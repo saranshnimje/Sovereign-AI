@@ -1,0 +1,262 @@
+"""
+Chat service — conversations, messages, and SSE streaming.
+"""
+import json
+import logging
+from datetime import datetime, timezone
+from typing import AsyncGenerator
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from config import get_settings
+from models.conversation import Conversation, Message
+from schemas.chat import ConversationCreate, ConversationDetail, ConversationResponse, MessageCreate, MessageResponse
+from services.llm_client import ChatMessage, ModelUnavailableError, OllamaClient
+
+logger = logging.getLogger(__name__)
+
+
+class ChatService:
+    def __init__(self, db: AsyncSession, llm: OllamaClient) -> None:
+        self.db = db
+        self.llm = llm
+        self.settings = get_settings()
+
+    # ------------------------------------------------------------------
+    # Conversations
+    # ------------------------------------------------------------------
+    async def list_conversations(
+        self, user_id: str, limit: int = 20, offset: int = 0
+    ) -> list[ConversationResponse]:
+        result = await self.db.execute(
+            select(Conversation)
+            .where(Conversation.user_id == user_id)
+            .order_by(Conversation.updated_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        convs = list(result.scalars().all())
+
+        responses = []
+        for c in convs:
+            # Count messages
+            count_result = await self.db.execute(
+                select(func.count()).where(Message.conversation_id == c.id)
+            )
+            msg_count = count_result.scalar_one()
+            resp = ConversationResponse.model_validate(c)
+            resp.message_count = msg_count
+            responses.append(resp)
+        return responses
+
+    async def create_conversation(
+        self, user_id: str, data: ConversationCreate
+    ) -> ConversationResponse:
+        conv = Conversation(
+            user_id=user_id,
+            model_name=data.model_name,
+            title=data.title,
+            system_prompt=data.system_prompt,
+        )
+        self.db.add(conv)
+        await self.db.flush()
+        resp = ConversationResponse.model_validate(conv)
+        resp.message_count = 0
+        return resp
+
+    async def get_conversation(
+        self, conv_id: str, user_id: str
+    ) -> ConversationDetail:
+        result = await self.db.execute(
+            select(Conversation)
+            .options(selectinload(Conversation.messages))
+            .where(Conversation.id == conv_id, Conversation.user_id == user_id)
+        )
+        conv = result.scalar_one_or_none()
+        if not conv:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Conversation not found")
+
+        base = ConversationResponse.model_validate(conv)
+        detail = ConversationDetail(
+            **base.model_dump(),
+            messages=[self._map_message(m) for m in conv.messages],
+        )
+        detail.message_count = len(detail.messages)
+        return detail
+
+    async def delete_conversation(self, conv_id: str, user_id: str) -> None:
+        result = await self.db.execute(
+            select(Conversation).where(
+                Conversation.id == conv_id, Conversation.user_id == user_id
+            )
+        )
+        conv = result.scalar_one_or_none()
+        if not conv:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Conversation not found")
+        await self.db.delete(conv)
+        await self.db.flush()
+
+    # ------------------------------------------------------------------
+    # Streaming send-message
+    # ------------------------------------------------------------------
+    async def stream_message(
+        self, conv_id: str, user_id: str, data: MessageCreate
+    ) -> AsyncGenerator[str, None]:
+        """
+        Yields SSE-formatted strings.
+        Saves user message first, then streams and saves assistant message.
+        """
+        # Fetch conversation
+        result = await self.db.execute(
+            select(Conversation)
+            .options(selectinload(Conversation.messages))
+            .where(Conversation.id == conv_id, Conversation.user_id == user_id)
+        )
+        conv = result.scalar_one_or_none()
+        if not conv:
+            yield _sse_error("conversation_not_found", "Conversation not found")
+            return
+
+        # Save user message
+        user_msg = Message(
+            conversation_id=conv_id,
+            role="user",
+            content=data.content,
+            metadata_json=json.dumps({"local": True}),
+        )
+        self.db.add(user_msg)
+        await self.db.flush()
+
+        # Build message history for LLM
+        model = data.model_name or conv.model_name
+        history: list[ChatMessage] = []
+        if conv.system_prompt:
+            history.append(ChatMessage(role="system", content=conv.system_prompt))
+
+        # Truncate history to last ~40 messages to stay within context
+        recent = conv.messages[-40:] if len(conv.messages) > 40 else conv.messages
+        for m in recent:
+            if m.id != user_msg.id:
+                history.append(ChatMessage(role=m.role, content=m.content))
+        history.append(ChatMessage(role="user", content=data.content))
+
+        # Stream from LLM
+        full_content = ""
+        token_count = 0
+        finish_reason = "stop"
+
+        try:
+            stream = await self.llm.chat(model=model, messages=history, stream=True)
+            async for token in stream:  # type: ignore[union-attr]
+                full_content += token
+                token_count += 1
+                yield _sse_token(token)
+        except ModelUnavailableError as exc:
+            yield _sse_error("llm_unavailable", f"The AI model is currently unavailable: {exc}")
+            return
+        except Exception as exc:
+            logger.exception("Unexpected error during chat stream: %s", exc)
+            yield _sse_error("stream_error", "An unexpected error occurred during streaming")
+            return
+
+        # Save assistant message
+        assistant_msg = Message(
+            conversation_id=conv_id,
+            role="assistant",
+            content=full_content,
+            token_count=token_count,
+            finish_reason=finish_reason,
+            metadata_json=json.dumps({"local": True, "model": model}),
+        )
+        self.db.add(assistant_msg)
+
+        # Auto-generate title from first user message (truncate to 80 chars).
+        # A short, deterministic title is better than blocking on an extra LLM call.
+        # The first 80 chars of the first user message is honest and immediate.
+        if not conv.title and len(conv.messages) <= 2:
+            # Strip common filler words from very long prompts for a tidier title
+            raw = data.content.strip().replace("\n", " ")
+            conv.title = raw[:80] + ("…" if len(raw) > 80 else "")
+
+        from datetime import datetime as _dt, timezone as _tz
+        conv.updated_at = _dt.now(_tz.utc)
+        await self.db.flush()
+
+        yield _sse_done(finish_reason, token_count)
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+    async def export_conversation(
+        self, conv_id: str, user_id: str, fmt: str = "markdown"
+    ) -> str:
+        detail = await self.get_conversation(conv_id, user_id)
+
+        if fmt == "json":
+            return json.dumps(
+                {
+                    "id": detail.id,
+                    "title": detail.title,
+                    "model": detail.model_name,
+                    "created_at": detail.created_at.isoformat(),
+                    "messages": [
+                        {"role": m.role, "content": m.content, "ts": m.created_at.isoformat()}
+                        for m in detail.messages
+                    ],
+                },
+                indent=2,
+            )
+
+        # Markdown
+        lines = [
+            f"# {detail.title or 'Conversation'}",
+            f"**Model:** {detail.model_name}  |  **Date:** {detail.created_at.date()}",
+            "",
+        ]
+        for m in detail.messages:
+            role_label = "**You**" if m.role == "user" else f"**{m.role.title()}**"
+            lines.append(f"{role_label}: {m.content}")
+            lines.append("")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _map_message(self, m: Message) -> MessageResponse:
+        meta: dict | None = None
+        if m.metadata_json:
+            try:
+                meta = json.loads(m.metadata_json)
+            except Exception:
+                pass
+        return MessageResponse(
+            id=m.id,
+            role=m.role,
+            content=m.content,
+            token_count=m.token_count,
+            finish_reason=m.finish_reason,
+            created_at=m.created_at,
+            metadata=meta,
+        )
+
+
+# ------------------------------------------------------------------
+# SSE helpers
+# ------------------------------------------------------------------
+def _sse_token(delta: str) -> str:
+    data = json.dumps({"delta": delta})
+    return f"event: token\ndata: {data}\n\n"
+
+
+def _sse_done(finish_reason: str, token_count: int) -> str:
+    data = json.dumps({"finish_reason": finish_reason, "token_count": token_count})
+    return f"event: done\ndata: {data}\n\n"
+
+
+def _sse_error(code: str, message: str) -> str:
+    data = json.dumps({"code": code, "message": message})
+    return f"event: error\ndata: {data}\n\n"

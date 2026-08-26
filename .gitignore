@@ -1,0 +1,73 @@
+# Secrets and environment config — NEVER commit these
+.env
+.env.*
+*.env.local
+*.env.bak
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Uploads and generated data
+backend/data/
+data/
+uploads/
+backups/
+
+# Model files
+*.gguf
+*.bin
+*.ggml
+*.pt
+*.pth
+
+# Docker
+.docker/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# Caches / temp
+.cache/
+.temp/
+tmp/
+*.tmp

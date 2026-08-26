@@ -1,0 +1,134 @@
+services:
+  # ------------------------------------------------------------------
+  # Frontend — React SPA served by nginx
+  # ------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+    image: sovereign-ai-frontend:1.0
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - sovereign_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ------------------------------------------------------------------
+  # Backend — FastAPI + SQLite
+  # ------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: sovereign-ai-backend:1.0
+    ports:
+      - "8000:8000"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      - TZ=Asia/Kolkata
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/sqlite/sovereign.db
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_URL=http://ollama:11434
+      - FRONTEND_ORIGIN=http://localhost
+      - LOG_LEVEL=INFO
+      - SECRET_KEY=${SECRET_KEY}
+      - DATA_DIR=/app/data
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-50}
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-python:3.11-slim}
+      - SANDBOX_TIMEOUT_S=${SANDBOX_TIMEOUT_S:-30}
+      - SANDBOX_MEM_LIMIT_MB=${SANDBOX_MEM_LIMIT_MB:-256}
+      - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-365}
+      - JWT_ACCESS_TTL_MIN=${JWT_ACCESS_TTL_MIN:-60}
+      - JWT_REFRESH_TTL_DAYS=${JWT_REFRESH_TTL_DAYS:-7}
+      - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL:-llama3.2:3b}
+      - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}
+    volumes:
+      - backend_data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock  # required for sandbox
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - sovereign_network
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Qdrant — local vector database
+  # ------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      # qdrant:v1.9.2 has no curl/wget/nc — use bash TCP check to port 6333
+      test: ["CMD", "bash", "-c", "cat /dev/null > /dev/tcp/localhost/6333"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - sovereign_network
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Ollama — local LLM server
+  # ------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:0.3.12
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - TZ=Asia/Kolkata
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/11434'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - sovereign_network
+    restart: unless-stopped
+
+# ------------------------------------------------------------------
+# Named volumes for data persistence
+# ------------------------------------------------------------------
+volumes:
+  backend_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  ollama_data:
+    driver: local
+
+# ------------------------------------------------------------------
+# Internal bridge network
+# ------------------------------------------------------------------
+networks:
+  sovereign_network:
+    driver: bridge
