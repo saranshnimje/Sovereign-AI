@@ -5,11 +5,32 @@ export interface ConversationResponse {
   system_prompt: string | null; context_mode: string
   created_at: string; updated_at: string; message_count: number
 }
+
+export interface CitationSource {
+  index: number
+  source_type: string
+  label: string
+  doc_id?: string
+  filename?: string
+  page_number?: number | null
+  score?: number
+  content_preview?: string
+  analysis_id?: string
+  sensor?: string
+  severity?: string
+}
+
 export interface MessageResponse {
   id: string; role: string; content: string
   token_count: number | null; finish_reason: string | null
-  created_at: string; metadata?: Record<string, unknown>
+  created_at: string; metadata?: {
+    local?: boolean
+    model?: string
+    agent?: { activity?: { tool: string; status: string; ms?: number }[] }
+    evidence?: { sources: CitationSource[]; source_count: number }
+  }
 }
+
 export interface ConversationDetail extends ConversationResponse {
   messages: MessageResponse[]
 }

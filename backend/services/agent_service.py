@@ -334,11 +334,15 @@ class AgentService:
             await self.db.flush()
 
         # ---- 5. Build execution context ----
+        from types import SimpleNamespace
+
         context = {
             "workspace_path": workspace,
             "sandbox_service": self.sandbox,
             "rag_service": self.rag_service,
             "kb_service": self.kb_service,
+            # Tenancy: tools (e.g. search_kb) scope KB access to the run owner
+            "user": SimpleNamespace(id=run.user_id, role=user_role),
         }
 
         # ---- 6. Execute via registry (VALIDATED input, not raw LLM text) ----

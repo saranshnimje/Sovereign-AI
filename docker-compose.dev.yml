@@ -10,10 +10,12 @@ services:
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tsconfig.json:/app/tsconfig.json
     environment:
       - VITE_API_URL=http://localhost:8000
     command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
-    # Override depends_on — don't wait for backend healthcheck in dev
     depends_on:
       - backend
 
@@ -21,19 +23,20 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app"]
     environment:
       - LOG_LEVEL=DEBUG
       - FRONTEND_ORIGIN=http://localhost:5173
       - DATABASE_URL=sqlite+aiosqlite:////app/data/sqlite/sovereign.db
       - QDRANT_URL=http://qdrant:6333
       - OLLAMA_URL=http://host.docker.internal:11434
+      - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL:-qwen3:14b}
+      - DEFAULT_VISION_MODEL=${DEFAULT_VISION_MODEL:-llava:7b}
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production-abc123}
-      # DATA_DIR is /app/data inside Docker (default).
-      # For local-only dev without Docker, set DATA_DIR=./data in your .env
+      - DOCKER_HOST=tcp://dockerproxy:2375
     volumes:
-      - ./backend:/app:ro          # mount source for hot-reload (read-only)
-      - backend_data:/app/data     # data volume still writable
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ./backend:/app
+      - backend_data:/app/data
+      - /app/__pycache__
     ports:
       - "8000:8000"

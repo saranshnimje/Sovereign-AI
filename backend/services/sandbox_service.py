@@ -30,6 +30,7 @@ import uuid
 from pathlib import Path
 
 from config import get_settings
+from services.settings_service import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ class SandboxError(Exception):
 
 class SandboxService:
     def __init__(self) -> None:
-        self.settings = get_settings()
+        self._env_settings = get_settings()
         self._docker = None
         self.available: bool = self._check_docker()
 
@@ -121,23 +122,24 @@ class SandboxService:
         """
         import docker  # type: ignore
 
-        settings = self.settings
+        # Runtime settings from JSON (admin-editable); sandbox_image from env
+        rt = load_settings()
         t_start = time.monotonic()
         container = None
 
         try:
             client = self._get_docker()
             container = client.containers.run(
-                image=settings.sandbox_image,
+                image=self._env_settings.sandbox_image,
                 # Execute from the code file — not via shell -c (no shell injection)
                 command=["python", "/workspace/_agent_code.py"],
                 detach=True,
                 remove=False,
                 # --- Resource limits ---
-                mem_limit=f"{settings.sandbox_mem_limit_mb}m",
-                memswap_limit=f"{settings.sandbox_mem_limit_mb}m",
+                mem_limit=f"{rt.sandbox_mem_limit_mb}m",
+                memswap_limit=f"{rt.sandbox_mem_limit_mb}m",
                 cpu_period=100_000,
-                cpu_quota=settings.sandbox_cpu_quota,
+                cpu_quota=rt.sandbox_cpu_quota,
                 pids_limit=50,
                 # --- Security hardening ---
                 network_mode="none",          # NO network
@@ -155,7 +157,7 @@ class SandboxService:
             # Wait with hard timeout
             timed_out = False
             try:
-                result = container.wait(timeout=settings.sandbox_timeout_s)
+                result = container.wait(timeout=rt.sandbox_timeout_s)
                 exit_code: int = result.get("StatusCode", -1)
             except Exception:
                 try:

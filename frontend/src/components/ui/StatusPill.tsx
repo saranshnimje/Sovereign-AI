@@ -1,7 +1,3 @@
-/**
- * System health status pill shown in the top bar.
- * Polls /api/v1/system/status every 30 seconds.
- */
 import { useEffect, useState } from 'react'
 import { systemApi, SystemStatus } from '../../api/system'
 import { useAuthStore } from '../../stores/authStore'
@@ -12,26 +8,18 @@ export default function StatusPill() {
 
   const poll = async () => {
     if (!accessToken) return
-    try {
-      const s = await systemApi.status()
-      setStatus(s.status)
-    } catch {
-      setStatus('unhealthy')
-    }
+    try { const s = await systemApi.status(); setStatus(s.status) }
+    catch { setStatus('unhealthy') }
   }
 
-  useEffect(() => {
-    poll()
-    const id = setInterval(poll, 30_000)
-    return () => clearInterval(id)
-  }, [accessToken])
+  useEffect(() => { poll(); const id = setInterval(poll, 30_000); return () => clearInterval(id) }, [accessToken])
 
   if (!accessToken || !status) return null
 
   const cfg: Record<string, { label: string; cls: string }> = {
-    healthy:   { label: 'System Healthy',   cls: 'bg-success-100 text-success-700 border border-success-200' },
-    degraded:  { label: 'System Degraded',  cls: 'bg-warning-100 text-warning-700 border border-warning-200' },
-    unhealthy: { label: 'System Unhealthy', cls: 'bg-danger-100  text-danger-700  border border-danger-200' },
+    healthy:   { label: 'System Healthy',   cls: 'bg-green-900/40 text-green-400 border border-green-800/40' },
+    degraded:  { label: 'System Degraded',  cls: 'bg-yellow-900/40 text-yellow-400 border border-yellow-800/40' },
+    unhealthy: { label: 'System Unhealthy', cls: 'bg-red-900/40 text-red-400 border border-red-800/40' },
   }
   const { label, cls } = cfg[status] ?? cfg['unhealthy']
 

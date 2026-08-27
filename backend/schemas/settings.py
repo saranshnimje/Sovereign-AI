@@ -79,3 +79,7 @@ class DashboardSummary(BaseModel):
     agent_run_count: int = 0
     pending_approval_count: int = 0
     total_audit_events: int = 0
+    sensor_analysis_count: int = 0
+    incident_count: int = 0
+    critical_risk_count: int = 0
+    high_risk_count: int = 0

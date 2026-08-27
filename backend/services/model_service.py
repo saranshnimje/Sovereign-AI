@@ -17,8 +17,8 @@ from services.llm_client import OllamaClient
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ROLES = {
-    "chat": "llama3.2:3b",
-    "embedding": "nomic-embed-text",
+    "chat": "llava:7b",
+    "embedding": "nomic-embed-text:latest",
     "vision": None,
 }
 

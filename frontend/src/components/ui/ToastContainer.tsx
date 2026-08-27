@@ -1,23 +1,17 @@
 import { useUIStore } from '../../stores/uiStore'
 
 const STYLES: Record<string, string> = {
-  success: 'bg-success-50 border-l-4 border-success-500 text-green-800',
-  error:   'bg-danger-100 border-l-4 border-danger-600  text-red-800',
-  warning: 'bg-warning-50 border-l-4 border-warning-500 text-yellow-800',
-  info:    'bg-blue-50   border-l-4 border-blue-500    text-blue-800',
+  success: 'bg-green-900/90 border-l-4 border-green-500 text-green-200',
+  error:   'bg-red-900/90 border-l-4 border-red-500 text-red-200',
+  warning: 'bg-yellow-900/90 border-l-4 border-yellow-500 text-yellow-200',
+  info:    'bg-blue-900/90 border-l-4 border-blue-500 text-blue-200',
 }
-const ICONS: Record<string, string> = {
-  success: '✓', error: '✗', warning: '⚠', info: 'ℹ',
-}
+const ICONS: Record<string, string> = { success: '✓', error: '✗', warning: '⚠', info: 'ℹ' }
 
 export default function ToastContainer() {
   const { toasts, removeToast } = useUIStore()
   return (
-    <div
-      className="fixed top-4 right-4 z-50 flex flex-col gap-2 min-w-72 max-w-sm"
-      aria-live="polite"
-      aria-atomic="false"
-    >
+    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 min-w-72 max-w-sm" aria-live="polite">
       {toasts.map((t) => (
         <div key={t.id} className={`rounded-lg shadow-lg p-4 ${STYLES[t.type]}`} role="alert">
           <div className="flex items-start gap-2">
@@ -26,13 +20,7 @@ export default function ToastContainer() {
               <p className="font-medium text-sm">{t.title}</p>
               {t.message && <p className="text-xs mt-0.5 opacity-80">{t.message}</p>}
             </div>
-            <button
-              onClick={() => removeToast(t.id)}
-              className="text-current opacity-60 hover:opacity-100 text-sm ml-1"
-              aria-label="Dismiss notification"
-            >
-              ✕
-            </button>
+            <button onClick={() => removeToast(t.id)} className="text-current opacity-60 hover:opacity-100 text-sm ml-1" aria-label="Dismiss">✕</button>
           </div>
         </div>
       ))}

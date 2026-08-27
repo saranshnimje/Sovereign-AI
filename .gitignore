@@ -71,3 +71,9 @@ npm-debug.log*
 .temp/
 tmp/
 *.tmp
+
+# Test artifacts
+backend/test.txt
+backend/test_quick_e2e.py
+backend/test_real_ollama.py
+scripts/sample_data/

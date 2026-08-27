@@ -36,16 +36,15 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
     environment:
       - TZ=Asia/Kolkata
       - DATABASE_URL=sqlite+aiosqlite:////app/data/sqlite/sovereign.db
       - QDRANT_URL=http://qdrant:6333
-      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_URL=http://host.docker.internal:11434
       - FRONTEND_ORIGIN=http://localhost
       - LOG_LEVEL=INFO
       - SECRET_KEY=${SECRET_KEY}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
       - DATA_DIR=/app/data
       - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-50}
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-python:3.11-slim}
@@ -54,17 +53,59 @@ services:
       - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-365}
       - JWT_ACCESS_TTL_MIN=${JWT_ACCESS_TTL_MIN:-60}
       - JWT_REFRESH_TTL_DAYS=${JWT_REFRESH_TTL_DAYS:-7}
-      - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL:-llama3.2:3b}
+      - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL:-qwen3:14b}
       - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}
+      - DEFAULT_VISION_MODEL=${DEFAULT_VISION_MODEL:-llava:7b}
+      # Sandbox reaches Docker through the LEAST-PRIVILEGE PROXY below.
+      # The backend container never sees the host socket directly.
+      - DOCKER_HOST=tcp://dockerproxy:2375
     volumes:
       - backend_data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock  # required for sandbox
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/system/health"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 30s
+    networks:
+      - sovereign_network
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Docker Socket Proxy — least-privilege gateway for the sandbox.
+  #
+  # The backend may ONLY manage containers/images it needs for sandboxed
+  # execution. Host-level Docker APIs (secrets, networks, exec into other
+  # containers, swarm, etc.) are denied by default.
+  # ------------------------------------------------------------------
+  dockerproxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: sovereign-dockerproxy
+    environment:
+      - CONTAINERS=1     # /containers/*  (create/start/wait/logs/remove)
+      - IMAGES=1         # /images/*      (pull sandbox image)
+      - PING=1           # /_ping         (availability check)
+      - VERSION=1        # /version       (SDK handshake)
+      - POST=1           # allow mutating requests within allowed prefixes
+      - ALLOW_RESTARTS=0
+      - ALLOW_STOP=0
+      - ALLOW_START=0
+      - SECRETS=0
+      - NETWORKS=0
+      - NODES=0
+      - TASKS=0
+      - SERVICES=0
+      - SWARM=0
+      - PLUGINS=0
+      - VOLUMES=0
+      - EXEC=0
+      - SYSTEM=0
+      - EVENTS=0
+      - BUILD=0
+      - COMMIT=0
+      - IMAGES_CREATE=1  # pull python:3.11-slim on demand
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - sovereign_network
     restart: unless-stopped
@@ -92,29 +133,6 @@ services:
       - sovereign_network
     restart: unless-stopped
 
-  # ------------------------------------------------------------------
-  # Ollama — local LLM server
-  # ------------------------------------------------------------------
-  ollama:
-    image: ollama/ollama:0.3.12
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    environment:
-      - TZ=Asia/Kolkata
-      - OLLAMA_HOST=0.0.0.0
-      - OLLAMA_ORIGINS=*
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/11434'"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    networks:
-      - sovereign_network
-    restart: unless-stopped
-
 # ------------------------------------------------------------------
 # Named volumes for data persistence
 # ------------------------------------------------------------------
@@ -122,8 +140,6 @@ volumes:
   backend_data:
     driver: local
   qdrant_data:
-    driver: local
-  ollama_data:
     driver: local
 
 # ------------------------------------------------------------------

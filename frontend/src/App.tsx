@@ -11,18 +11,9 @@ import AppShell from './components/layout/AppShell'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import ChatPage from './pages/ChatPage'
-import KnowledgeBasesPage from './pages/KnowledgeBasesPage'
-import KnowledgeBaseDetailPage from './pages/KnowledgeBaseDetailPage'
-import AgentPage from './pages/AgentPage'
-import ApprovalsPage from './pages/ApprovalsPage'
 import AuditPage from './pages/AuditPage'
 import ModelsPage from './pages/ModelsPage'
 import ProvidersPage from './pages/ProvidersPage'
-import ToolsPage from './pages/ToolsPage'
-import PluginsPage from './pages/PluginsPage'
-import DataPage from './pages/DataPage'
-import SettingsPage from './pages/SettingsPage'
-import PlaceholderPage from './pages/PlaceholderPage'
 
 // ------------------------------------------------------------------
 // Protected route wrapper — redirects to /login if not authed
@@ -125,38 +116,6 @@ export default function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/chat/:convId" element={<ChatPage />} />
-
-            {/* Phase 2 — Knowledge Bases */}
-            <Route path="/knowledge-bases" element={<KnowledgeBasesPage />} />
-            <Route path="/knowledge-bases/:kbId" element={<KnowledgeBaseDetailPage />} />
-
-            {/* Phase 2+ placeholders */}
-            <Route
-              path="/documents"
-              element={
-                <RequireRole roles={['analyst', 'admin']}>
-                  <PlaceholderPage title="Documents" icon="📄" phase="Phase 2 (via Knowledge Bases)" />
-                </RequireRole>
-              }
-            />
-            {/* Phase 3 — Agents and Approvals */}
-            <Route
-              path="/agents"
-              element={
-                <RequireRole roles={['analyst', 'admin']}>
-                  <AgentPage />
-                </RequireRole>
-              }
-            />
-            <Route
-              path="/approvals"
-              element={
-                <RequireRole roles={['admin']}>
-                  <ApprovalsPage />
-                </RequireRole>
-              }
-            />
-            {/* Phase 4 — Audit, Models, Settings */}
             <Route
               path="/audit"
               element={
@@ -167,17 +126,6 @@ export default function App() {
             />
             <Route path="/models" element={<ModelsPage />} />
             <Route path="/providers" element={<ProvidersPage />} />
-            <Route path="/tools" element={<ToolsPage />} />
-            <Route path="/plugins" element={<PluginsPage />} />
-            <Route path="/data" element={<DataPage />} />
-            <Route
-              path="/settings"
-              element={
-                <RequireRole roles={['admin']}>
-                  <SettingsPage />
-                </RequireRole>
-              }
-            />
 
             {/* 404 fallback */}
             <Route path="*" element={<Navigate to="/" replace />} />

@@ -135,7 +135,8 @@ async def test_upload_nonexistent_kb_rejected(auth_client: AsyncClient):
         files={"file": ("test.txt", b"content here", "text/plain")},
         data={"kb_id": "00000000-0000-0000-0000-000000000000"},
     )
-    assert resp.status_code == 422
+    # Tenancy policy: unknown OR unauthorized KB ⇒ 404 (no existence leakage)
+    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio

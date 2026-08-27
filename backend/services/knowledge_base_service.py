@@ -74,6 +74,23 @@ class KnowledgeBaseService:
         )
         return list(result.scalars().all())
 
+    async def list_accessible(self, user) -> list[KnowledgeBase]:
+        """KBs the user may see: admins see all; others only their own."""
+        from services.kb_access import kb_access_filter
+
+        result = await self.db.execute(
+            select(KnowledgeBase)
+            .where(kb_access_filter(user))
+            .order_by(KnowledgeBase.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def reset_doc_for_reindex(self, doc_id: str) -> bool:
+        """Reset a document for re-ingestion (shared implementation)."""
+        from services.document_service import reset_document_for_reprocess
+
+        return await reset_document_for_reprocess(self.db, doc_id)
+
     async def get(self, kb_id: str) -> KnowledgeBase:
         result = await self.db.execute(
             select(KnowledgeBase).where(KnowledgeBase.id == kb_id)

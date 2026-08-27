@@ -41,16 +41,21 @@ def _get_ocr():
             show_log=False,
         )
         _ocr_available = True
-        logger.info("PaddleOCR initialized in CPU mode")
+        logger.info("OCR service available (PaddleOCR initialized in CPU mode)")
     except ImportError:
-        logger.warning(
-            "PaddleOCR is not installed. OCR will be skipped. "
-            "Install with: pip install paddleocr paddlepaddle"
+        _ocr_available = False
+        logger.info(
+            "OCR service unavailable (PaddleOCR not installed) — "
+            "scanned documents will produce empty OCR text. "
+            "To enable: uncomment paddleocr+paddlepaddle in requirements.txt and reinstall."
         )
-        _ocr_available = False
     except Exception as exc:
-        logger.warning("PaddleOCR initialization failed: %s", exc)
         _ocr_available = False
+        logger.info(
+            "OCR service unavailable (PaddleOCR init failed: %s) — "
+            "scanned documents will produce empty OCR text",
+            exc,
+        )
 
     return _ocr_instance
 

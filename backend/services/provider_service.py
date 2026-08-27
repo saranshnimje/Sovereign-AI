@@ -355,9 +355,9 @@ class ProviderService:
             if not isinstance(m, dict):
                 continue
             name = (
-                m.get("name")
-                or m.get("id")
+                m.get("id")
                 or m.get("model")
+                or m.get("name")
             )
             if not name:
                 continue  # skip malformed entries rather than fabricating one

@@ -110,6 +110,25 @@ async def test_dashboard_summary_accessible(auth_client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_dashboard_summary_includes_operational_metrics(auth_client: AsyncClient):
+    resp = await auth_client.get("/api/v1/settings/summary")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "sensor_analysis_count" in data
+    assert "incident_count" in data
+    assert "critical_risk_count" in data
+    assert "high_risk_count" in data
+    assert isinstance(data["sensor_analysis_count"], int)
+    assert isinstance(data["incident_count"], int)
+    assert isinstance(data["critical_risk_count"], int)
+    assert isinstance(data["high_risk_count"], int)
+    assert data["sensor_analysis_count"] == 0
+    assert data["incident_count"] == 0
+    assert data["critical_risk_count"] == 0
+    assert data["high_risk_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_dashboard_summary_unauthenticated_denied(client: AsyncClient):
     resp = await client.get("/api/v1/settings/summary")
     assert resp.status_code in (401, 403)

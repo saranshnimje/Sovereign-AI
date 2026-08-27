@@ -12,6 +12,9 @@ from models.provider_model import ProviderModel
 from models.user_prefs import UserModelPref
 from models.tool_settings import ToolSetting, PluginSetting
 from models.data import Organization, DataSource
+from models.sensor import SensorAnalysis
+from models.incident import Incident
+from models.vision import InspectionImage
 
 __all__ = [
     "User",
@@ -29,4 +32,10 @@ __all__ = [
     "UserModelPref",
     "ToolSetting",
     "PluginSetting",
+    "Organization",
+    "DataSource",
+    "SensorAnalysis",
+    "Incident",
+    "InspectionImage",
 ]
+

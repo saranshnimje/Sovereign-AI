@@ -16,11 +16,18 @@ def generate_uuid() -> str:
 
 
 class TimestampMixin:
-    """Adds created_at / updated_at columns to any model."""
+    """
+    Adds created_at / updated_at columns to any model.
+
+    NOTE: server-side defaults (func.now()) expire these attributes after
+    flush. Code that mutates rows and then serialises them in the same
+    request must `await db.refresh(obj)` first (see reset_document_for_reprocess)
+    — a lazy refresh from sync context raises MissingGreenlet under AsyncSession.
+    """
 
     created_at: Mapped[datetime] = mapped_column(
-        UTCDateTime, default=func.now(), nullable=False
+        UTCDateTime, default=func.now(), nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime, default=func.now(), onupdate=func.now(), nullable=False
+        UTCDateTime, default=func.now(), onupdate=func.now(), nullable=False,
     )

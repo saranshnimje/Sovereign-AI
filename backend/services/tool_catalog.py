@@ -61,6 +61,16 @@ PLUGIN_MANIFESTS: list[dict[str, Any]] = [
         "default_enabled": True,
     },
     {
+        "id": "domain-tools",
+        "name": "Domain Intelligence",
+        "version": "1.0.0",
+        "description": "Sensor analysis, vision inspection, incident management, and system status.",
+        "author": "Sovereign AI Workbench",
+        "tools": ["system_status", "sensor_analysis", "vision_inspection", "incident_get", "incident_investigate"],
+        "permissions": ["sensor_data_read", "vision_data_read", "incident_read"],
+        "default_enabled": True,
+    },
+    {
         # Dangerous by design → DISABLED by default. Enabling requires admin.
         "id": "advanced-workspace",
         "name": "Advanced Workspace",

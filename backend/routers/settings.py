@@ -15,7 +15,9 @@ from database import get_db
 from dependencies import get_current_user, require_role
 from models.agent import AgentRun, ApprovalRequest
 from models.audit import AuditLog
+from models.incident import Incident
 from models.knowledge_base import Document, KnowledgeBase
+from models.sensor import SensorAnalysis
 from models.user import User
 from schemas.settings import DashboardSummary, SystemSettings
 from services.audit_service import AuditService
@@ -84,6 +86,34 @@ async def dashboard_summary(
         audit_count = (await db.execute(select(func.count()).select_from(AuditLog))).scalar_one()
     except Exception:
         audit_count = 0
+    try:
+        sensor_count = (await db.execute(select(func.count()).select_from(SensorAnalysis))).scalar_one()
+    except Exception:
+        sensor_count = 0
+    try:
+        incident_count = (await db.execute(select(func.count()).select_from(Incident))).scalar_one()
+    except Exception:
+        incident_count = 0
+    try:
+        critical_count = (
+            await db.execute(
+                select(func.count()).select_from(Incident).where(
+                    Incident.recommendation_risk_level == "critical"
+                )
+            )
+        ).scalar_one()
+    except Exception:
+        critical_count = 0
+    try:
+        high_count = (
+            await db.execute(
+                select(func.count()).select_from(Incident).where(
+                    Incident.recommendation_risk_level == "high"
+                )
+            )
+        ).scalar_one()
+    except Exception:
+        high_count = 0
 
     return DashboardSummary(
         knowledge_base_count=kb_count,
@@ -91,7 +121,40 @@ async def dashboard_summary(
         agent_run_count=run_count,
         pending_approval_count=pending_count,
         total_audit_events=audit_count,
+        sensor_analysis_count=sensor_count,
+        incident_count=incident_count,
+        critical_risk_count=critical_count,
+        high_risk_count=high_count,
     )
+
+
+@router.get("/knowledge-bases")
+async def dashboard_knowledge_bases(
+    _user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List knowledge bases with document counts for the dashboard."""
+    result = await db.execute(
+        select(
+            KnowledgeBase.id,
+            KnowledgeBase.name,
+            KnowledgeBase.created_at,
+            func.count(Document.id).label("doc_count"),
+        )
+        .outerjoin(Document, Document.kb_id == KnowledgeBase.id)
+        .group_by(KnowledgeBase.id)
+        .order_by(KnowledgeBase.created_at.desc())
+    )
+    rows = result.all()
+    return [
+        {
+            "id": str(r.id),
+            "name": r.name,
+            "doc_count": r.doc_count,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
 
 
 # ---- User management (admin) ----

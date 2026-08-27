@@ -35,6 +35,8 @@ _DATA_DIR = _resolve_data_dir()
 class Settings(BaseSettings):
     # ---- Core ----
     secret_key: str = "change-me-in-production-use-32-random-bytes"
+    # deployment mode: "development" (permissive) | "production" (fail-fast on insecure secrets)
+    environment: str = "development"
     # DATA_DIR lets operators override where all persistent files live.
     # Docker: /app/data (volume-mounted).  Local dev: auto-detected.
     data_dir: str = _DATA_DIR
@@ -87,11 +89,23 @@ class Settings(BaseSettings):
     sandbox_mem_limit_mb: int = 256
     sandbox_cpu_quota: int = 50000  # 50% of one CPU
 
+    # ---- Rate limiting (in-process sliding window, per client IP) ----
+    # Disable with RATE_LIMIT_ENABLED=false. Limits are requests/minute/IP.
+    # NOTE: per-process scope — multiple uvicorn workers each enforce their own bucket.
+    rate_limit_enabled: bool = True
+    rate_limit_auth_per_min: int = 30
+    rate_limit_upload_per_min: int = 30
+    rate_limit_ai_per_min: int = 120
+
     # ---- Audit ----
     audit_retention_days: int = 365
 
     # ---- AI Models (defaults shown in .env.example) ----
     default_chat_model: str = "llama3.2:3b"
+    # Local vision-capable Ollama model for inspection images (e.g. "llava:7b").
+    # EMPTY means vision is NOT configured — endpoints must then report
+    # "Vision analysis unavailable" honestly instead of guessing.
+    default_vision_model: str = ""
 
     # ---- Derived paths (read-only properties) ----
     @property
@@ -118,7 +132,46 @@ class Settings(BaseSettings):
     )
 
 
+# Secrets that must never reach production
+_INSECURE_SECRET_MARKERS = (
+    "change-me",
+    "your-secret-key-here",
+    "dev-secret-key",
+    "test-secret",
+)
+
+
+def _validate_production_secrets(settings: "Settings") -> None:
+    """
+    Fail-fast guard: refuse to boot in production with insecure secrets.
+
+    Development is explicitly permitted to use documented defaults.
+    Production requires a real, high-entropy SECRET_KEY — the application
+    will NOT silently generate or fall back to an insecure one.
+    """
+    if settings.environment.strip().lower() != "production":
+        return
+
+    key = settings.secret_key.strip()
+    lowered = key.lower()
+    if len(key) < 32:
+        raise RuntimeError(
+            "REFUSING TO START: SECRET_KEY is shorter than 32 characters "
+            "and ENVIRONMENT=production. Generate one with: "
+            'python -c "import secrets; print(secrets.token_hex(32))"'
+        )
+    for marker in _INSECURE_SECRET_MARKERS:
+        if marker in lowered:
+            raise RuntimeError(
+                "REFUSING TO START: SECRET_KEY looks like a placeholder/default value "
+                f"('{marker}') while ENVIRONMENT=production. Set a real secret via "
+                "the SECRET_KEY environment variable."
+            )
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Return cached Settings instance. Call once per process."""
-    return Settings()
+    settings = Settings()
+    _validate_production_secrets(settings)
+    return settings

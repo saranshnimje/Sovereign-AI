@@ -6,10 +6,10 @@ export default {
     extend: {
       colors: {
         primary: {
-          50:  '#EFF6FF',
-          100: '#DBEAFE',
-          600: '#2563EB',
-          700: '#1D4ED8',
+          50:  '#F0FDF4',
+          100: '#DCFCE7',
+          600: '#16A34A',
+          700: '#15803D',
         },
         neutral: {
           50:  '#F9FAFB',
@@ -49,6 +49,10 @@ export default {
         mono: [
           '"JetBrains Mono"', '"Fira Code"', 'Consolas', '"Courier New"', 'monospace',
         ],
+      },
+      boxShadow: {
+        'glow-green': '0 0 20px rgba(34, 197, 94, 0.15)',
+        'glow-green-lg': '0 0 40px rgba(34, 197, 94, 0.2)',
       },
     },
   },

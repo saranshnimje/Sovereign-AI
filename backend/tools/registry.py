@@ -190,6 +190,7 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
     from tools import file_read, file_list, file_write, file_delete
     from tools import search_kb, calculator, python_exec
     from tools import web, meta_tools
+    from tools import system_status, sensor_tool, vision_tool, incident_tool
 
     reg.register(ToolDefinition(
         name="file_read",
@@ -248,7 +249,7 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
         input_schema=file_delete.FileDeleteInput,
         output_schema=file_delete.FileDeleteOutput,
         risk_level=RISK_HIGH,
-        required_role=ROLE_ANALYST,
+        required_role=ROLE_ADMIN,
         requires_sandbox=False,
         handler=file_delete.execute,
         tags=["file", "destructive"],
@@ -316,7 +317,7 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
         ),
         input_schema=web.WebSearchInput,
         output_schema=web.WebSearchOutput,
-        risk_level=RISK_MEDIUM,
+        risk_level=RISK_HIGH,
         required_role=ROLE_ANALYST,
         requires_sandbox=False,
         handler=web.web_search_execute,
@@ -335,7 +336,7 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
         ),
         input_schema=web.WebFetchInput,
         output_schema=web.WebFetchOutput,
-        risk_level=RISK_MEDIUM,
+        risk_level=RISK_HIGH,
         required_role=ROLE_ANALYST,
         requires_sandbox=False,
         handler=web.web_fetch_execute,
@@ -393,10 +394,105 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
         input_schema=python_exec.PythonExecInput,
         output_schema=python_exec.PythonExecOutput,
         risk_level=RISK_HIGH,
-        required_role=ROLE_ANALYST,
+        required_role=ROLE_ADMIN,
         requires_sandbox=True,
         handler=python_exec.execute,
         tags=["compute", "sandbox"],
         category="advanced",
         permissions=["sandboxed_code_execution"],
+    ))
+
+    # ---- Domain tools (Sovereign AI Workbench specific) ----
+
+    reg.register(ToolDefinition(
+        name="system_status",
+        description=(
+            "Check the status of local AI services: Ollama availability, "
+            "installed models, and sandbox status. Read-only."
+        ),
+        input_schema=system_status.SystemStatusInput,
+        output_schema=system_status.SystemStatusOutput,
+        risk_level=RISK_LOW,
+        required_role=ROLE_VIEWER,
+        requires_sandbox=False,
+        handler=system_status.execute,
+        tags=["system", "status"],
+        category="system",
+        version="1.0.0",
+        permissions=[],
+    ))
+
+    reg.register(ToolDefinition(
+        name="sensor_analysis",
+        description=(
+            "Analyze sensor data (CSV) for anomalies, risk assessment, "
+            "and trend detection. Use an existing analysis_id to retrieve "
+            "results, or provide csv_data to run a new analysis."
+        ),
+        input_schema=sensor_tool.SensorAnalysisInput,
+        output_schema=sensor_tool.SensorAnalysisOutput,
+        risk_level=RISK_LOW,
+        required_role=ROLE_ANALYST,
+        requires_sandbox=False,
+        handler=sensor_tool.execute,
+        tags=["sensor", "analysis"],
+        category="domain",
+        version="1.0.0",
+        permissions=["sensor_data_read"],
+    ))
+
+    reg.register(ToolDefinition(
+        name="vision_inspection",
+        description=(
+            "Retrieve vision inspection results for an image or incident. "
+            "Returns findings, severity, and confidence when available."
+        ),
+        input_schema=vision_tool.VisionInspectionInput,
+        output_schema=vision_tool.VisionInspectionOutput,
+        risk_level=RISK_LOW,
+        required_role=ROLE_ANALYST,
+        requires_sandbox=False,
+        handler=vision_tool.execute,
+        tags=["vision", "inspection"],
+        category="domain",
+        version="1.0.0",
+        permissions=["vision_data_read"],
+    ))
+
+    reg.register(ToolDefinition(
+        name="incident_get",
+        description=(
+            "Get details of an incident by ID. Returns title, machine, "
+            "asset tag, risk level, and status. Only accessible to the "
+            "incident owner or admins."
+        ),
+        input_schema=incident_tool.IncidentGetInput,
+        output_schema=incident_tool.IncidentGetOutput,
+        risk_level=RISK_LOW,
+        required_role=ROLE_ANALYST,
+        requires_sandbox=False,
+        handler=incident_tool.execute_get,
+        tags=["incident"],
+        category="domain",
+        version="1.0.0",
+        permissions=["incident_read"],
+    ))
+
+    reg.register(ToolDefinition(
+        name="incident_investigate",
+        description=(
+            "Run an evidence-grounded investigation on an incident. "
+            "Collects sensor data, document references, and vision findings "
+            "to produce a grounded risk assessment."
+        ),
+        input_schema=incident_tool.IncidentInvestigateInput,
+        output_schema=incident_tool.IncidentInvestigateOutput,
+        risk_level=RISK_MEDIUM,
+        required_role=ROLE_ANALYST,
+        requires_sandbox=False,
+        handler=incident_tool.execute_investigate,
+        tags=["incident", "investigation"],
+        category="domain",
+        version="1.0.0",
+        permissions=["incident_read"],
     ))

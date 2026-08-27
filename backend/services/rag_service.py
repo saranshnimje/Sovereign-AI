@@ -91,6 +91,25 @@ class RagService:
             )
         embed_ms = int((time.monotonic() - t0) * 1000)
 
+        # -- P0.8: dimension-drift guard (query side) --
+        # The query vector must match the model the KB was built with.
+        from services.embedding_service import get_expected_dimension
+
+        expected_dim = get_expected_dimension(embedding_model)
+        if not query_vector or len(query_vector) != expected_dim:
+            return RagResult(
+                answer=None, sources=[],
+                query_embedding_ms=embed_ms, retrieval_ms=0, generation_ms=None,
+                low_confidence=False,
+                error=(
+                    f"Embedding model mismatch: '{embedding_model}' should produce "
+                    f"{expected_dim}-dim vectors but produced "
+                    f"{len(query_vector)}. Refusing to search with incompatible "
+                    "vectors — reindex this knowledge base or restore the "
+                    "original embedding model."
+                ),
+            )
+
         # -- 2. Search --
         t1 = time.monotonic()
         try:
@@ -107,6 +126,23 @@ class RagService:
                 error=f"Vector search failed: {exc}",
             )
         retrieval_ms = int((time.monotonic() - t1) * 1000)
+
+        # -- P0.7: provenance check — refuse mixed-model results --
+        stale_models = {
+            r.get("embed_model") for r in raw
+            if r.get("embed_model") and r.get("embed_model") != embedding_model
+        }
+        if stale_models:
+            return RagResult(
+                answer=None, sources=[],
+                query_embedding_ms=embed_ms, retrieval_ms=retrieval_ms,
+                generation_ms=None,
+                error=(
+                    "Knowledge base contains vectors from a different "
+                    f"embedding model ({', '.join(sorted(stale_models))}); expected "
+                    f"'{embedding_model}'. An explicit reindex is required."
+                ),
+            )
 
         sources = [
             RagSource(

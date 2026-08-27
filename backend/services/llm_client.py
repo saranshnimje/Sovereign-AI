@@ -38,6 +38,9 @@ class ModelUnavailableError(Exception):
 class ChatMessage:
     role: str          # system | user | assistant | tool
     content: str
+    # Optional base64-encoded images (local Ollama multimodal models, e.g. llava).
+    # Adapters that cannot handle images must fail honestly rather than drop them.
+    images: list[str] | None = None
 
 
 @dataclass
@@ -128,7 +131,11 @@ class OllamaProvider(BaseLLMProvider):
     ) -> "ChatResponse | AsyncGenerator[str, None]":
         payload: dict = {
             "model": model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "messages": [
+                {**{"role": m.role, "content": m.content},
+                 **({"images": m.images} if m.images else {})}
+                for m in messages
+            ],
             "stream": stream,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
@@ -164,7 +171,12 @@ class OllamaProvider(BaseLLMProvider):
                         try:
                             data = json.loads(line)
                             if not data.get("done"):
-                                delta = data.get("message", {}).get("content", "")
+                                msg = data.get("message", {})
+                                delta = msg.get("content", "")
+                                # Thinking models (qwen3, deepseek-r1) may put
+                                # output in "thinking" when content is empty.
+                                if not delta and msg.get("thinking"):
+                                    delta = msg["thinking"]
                                 if delta:
                                     yield delta
                         except json.JSONDecodeError:
@@ -300,11 +312,29 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 json=payload,
                 headers=self._build_headers(),
             )
+            # Retry on 429 with exponential backoff (up to 3 attempts)
+            for attempt in range(3):
+                if resp.status_code != 429:
+                    break
+                retry_after = float(resp.headers.get("retry-after", 2 ** (attempt + 1)))
+                import asyncio as _aio
+                await _aio.sleep(min(retry_after, 30))
+                resp = await self._get_client().post(
+                    f"{self._api_root()}/chat/completions",
+                    json=payload,
+                    headers=self._build_headers(),
+                )
             resp.raise_for_status()
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise ModelUnavailableError(str(exc)) from exc
         except httpx.HTTPStatusError as exc:
-            raise ModelUnavailableError(str(exc)) from exc
+            body = ""
+            if exc.response is not None:
+                try:
+                    body = exc.response.text[:500]
+                except Exception:
+                    pass
+            raise ModelUnavailableError(f"{exc} | Response: {body}") from exc
 
         data = resp.json()
         choice = data.get("choices", [{}])[0]

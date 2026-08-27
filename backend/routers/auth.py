@@ -10,6 +10,7 @@ from models.user import User
 from schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse, UserUpdate
 from services.audit_service import AuditService
 from services.auth_service import AuthService
+from utils.rate_limit import auth_rate_limit
 
 router = APIRouter(tags=["auth"])
 
@@ -25,6 +26,7 @@ async def register(
     data: RegisterRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit),
 ):
     service = AuthService(db)
     first_admin = await service.count_users() == 0
@@ -45,6 +47,7 @@ async def login(
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit),
 ):
     service = AuthService(db)
     try:
@@ -80,6 +83,7 @@ async def refresh(
     response: Response,
     db: AsyncSession = Depends(get_db),
     refresh_token: str | None = Cookie(default=None, alias=_REFRESH_COOKIE),
+    _rl: None = Depends(auth_rate_limit),
 ):
     if not refresh_token:
         raise HTTPException(401, "No refresh token provided")

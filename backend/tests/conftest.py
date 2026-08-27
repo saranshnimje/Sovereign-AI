@@ -2,6 +2,12 @@
 Shared pytest fixtures for unit and integration tests.
 All tests use an in-memory SQLite database — no persistent state between runs.
 """
+import os
+
+# Rate limiting is disabled for the general suite so integration tests can
+# hammer endpoints freely; test_rate_limit.py re-enables it explicitly.
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -9,6 +15,24 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from database import Base, get_db
 from main import app
+
+
+# ------------------------------------------------------------------
+# Tool-registry state reset (the registry is a module-level singleton;
+# integration tests that disable tools must not leak into other tests)
+# ------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _reset_tool_registry_state():
+    from tools.registry import get_registry
+
+    def _enable_all():
+        reg = get_registry()
+        for tool in reg.list_all():
+            tool.enabled = True
+
+    _enable_all()
+    yield
+    _enable_all()
 
 
 # ------------------------------------------------------------------
@@ -24,6 +48,7 @@ async def db():
         await conn.run_sync(Base.metadata.create_all)
 
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
     async with session_factory() as session:
         yield session
 

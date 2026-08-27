@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import get_settings
 from models.knowledge_base import KnowledgeBase, Document  # type: ignore[attr-defined]
+from services.settings_service import load_settings
 from services.audit_service import AuditService
 from services.embedding_service import EmbeddingService, get_expected_dimension
 from services.ocr_service import needs_ocr, run_ocr
@@ -34,6 +35,31 @@ STEPS = ["validation", "extraction", "ocr", "cleaning", "chunking", "embedding",
 def _make_steps(status_map: dict[str, str] | None = None) -> list[dict]:
     sm = status_map or {}
     return [{"step": s, "status": sm.get(s, "pending"), "duration_ms": None} for s in STEPS]
+
+
+async def reset_document_for_reprocess(db: AsyncSession, doc_id: str) -> bool:
+    """
+    Shared state-reset for re-running ingestion (retry + reindex paths use
+    this single implementation). Returns False when the row disappeared.
+    """
+    result = await db.execute(select(Document).where(Document.id == doc_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        return False
+    steps = json.loads(doc.processing_steps_json or "[]") or _make_steps()
+    for s in steps:
+        s["status"] = "pending"
+        s["duration_ms"] = None
+    doc.status = "pending"
+    doc.error_message = None
+    doc.chunk_count = 0
+    doc.processing_steps_json = json.dumps(steps)
+    await db.flush()
+    # Server-side onupdate(func.now()) expires `updated_at` after flush;
+    # refresh eagerly so later sync-context reads cannot trigger a lazy
+    # load (which raises MissingGreenlet under AsyncSession).
+    await db.refresh(doc)
+    return True
 
 
 def _set_step(steps: list[dict], name: str, status: str, duration_ms: int | None = None):
@@ -55,7 +81,6 @@ class DocumentService:
         self.db = db
         self.embedding_svc = embedding_svc
         self.qdrant_svc = qdrant_svc
-        self.settings = get_settings()
 
     # ------------------------------------------------------------------
     # Upload entry point (called from router — fast path)
@@ -79,7 +104,7 @@ class DocumentService:
             safe_name, detected_mime = validate_upload(
                 file.filename or "upload",
                 content,
-                max_size_mb=self.settings.max_upload_size_mb,
+                max_size_mb=load_settings().max_upload_size_mb,
             )
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
@@ -90,7 +115,7 @@ class DocumentService:
             raise ValueError(f"Knowledge base '{kb_id}' not found")
 
         # Build storage path
-        kb_dir = Path(self.settings.upload_dir) / kb_id
+        kb_dir = Path(get_settings().upload_dir) / kb_id
         kb_dir.mkdir(parents=True, exist_ok=True)
         doc_id = str(uuid.uuid4())
         stored_name = f"{doc_id}_{safe_name}"
@@ -178,8 +203,8 @@ class DocumentService:
             kb = await self._get_kb(doc.kb_id)
             chunks = chunk_text(
                 text,
-                chunk_size=self.settings.default_chunk_size,
-                overlap=self.settings.default_chunk_overlap,
+                chunk_size=load_settings().default_chunk_size,
+                overlap=load_settings().default_chunk_overlap,
                 doc_id=doc_id,
                 kb_id=doc.kb_id,
                 filename=doc.original_name,
@@ -196,6 +221,20 @@ class DocumentService:
             vectors = await self.embedding_svc.embed_texts(
                 [c.content for c in chunks], model=embed_model
             )
+            # ---- P0.8: dimension-drift guard ----
+            # Never truncate, pad, or index incompatible vectors. Fail clearly.
+            expected_dim = get_expected_dimension(embed_model)
+            if not vectors:
+                raise ValueError(
+                    f"Embedding model '{embed_model}' returned no vectors"
+                )
+            bad_dims = {len(v) for v in vectors}
+            if bad_dims != {expected_dim}:
+                raise ValueError(
+                    f"Embedding dimension mismatch: model '{embed_model}' expects "
+                    f"{expected_dim}, got {sorted(bad_dims)}. Refusing to index "
+                    "incompatible vectors."
+                )
             embed_ms = int((time.monotonic() - t2) * 1000)
             _set_step(steps, "embedding", "done", embed_ms)
 
@@ -212,6 +251,10 @@ class DocumentService:
                     "page_number": c.page_number,
                     "filename":  doc.original_name,
                     "created_at": datetime.now(timezone.utc).isoformat(),
+                    # ---- P0.7: embedding provenance stamps ----
+                    "embed_model": embed_model,
+                    "embed_version": embed_model,   # Ollama tag serves as version
+                    "embed_dim": expected_dim,
                 }
                 for c in chunks
             ]
@@ -266,14 +309,59 @@ class DocumentService:
         doc = result.scalar_one_or_none()
         return doc
 
-    async def list_documents(
-        self, kb_id: str | None = None, limit: int = 50, offset: int = 0
+    async def get_kb(self, kb_id: str) -> KnowledgeBase | None:
+        """Fetch the owning KB (existence only — authorization via kb_access)."""
+        return await self._get_kb(kb_id)
+
+    async def list_accessible_documents(
+        self,
+        user,  # models.user.User
+        kb_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[Document]:
-        q = select(Document).order_by(Document.created_at.desc())
+        """
+        List documents scoped to what the user may see:
+        admins see everything; everyone else only documents inside
+        their own knowledge bases. Prevents cross-tenant enumeration.
+        """
+        from services.kb_access import kb_access_filter
+
+        q = (
+            select(Document)
+            .join(KnowledgeBase, Document.kb_id == KnowledgeBase.id)
+            .where(kb_access_filter(user))
+            .order_by(Document.created_at.desc())
+        )
         if kb_id:
             q = q.where(Document.kb_id == kb_id)
         result = await self.db.execute(q.offset(offset).limit(limit))
         return list(result.scalars().all())
+
+    async def reset_for_retry(self, doc_id: str) -> bool:
+        """
+        Reset a FAILED document to pending with cleared error state so the
+        ingestion pipeline can run again. Returns False when the document
+        row disappeared.
+        """
+        return await reset_document_for_reprocess(self.db, doc_id)
+
+    async def delete_document_checked(self, db_unused, doc_id: str, user) -> None:
+        """
+        Ownership-checked deletion (documents inherit KB ownership).
+        Raises 404 when missing OR not accessible to this user.
+        """
+        from fastapi import HTTPException
+
+        from services.kb_access import ensure_kb_access
+
+        doc = await self._get_doc(doc_id)
+        if doc is None:
+            raise HTTPException(404, "Document not found")
+        kb = await self._get_kb(doc.kb_id)
+        ensure_kb_access(kb, user, write=True)
+
+        await self.delete_document(doc_id)
 
     async def delete_document(self, doc_id: str) -> None:
         doc = await self._get_doc(doc_id)

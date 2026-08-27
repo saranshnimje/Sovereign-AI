@@ -15,7 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from config import get_settings
 from database import init_db
-from routers import auth, chat, models, system, audit, documents, knowledge_bases, agents, approvals, settings as settings_router, providers, tools as tools_router, plugins as plugins_router, data as data_router
+from routers import auth, chat, models, system, audit, providers, settings as settings_router
 
 # ------------------------------------------------------------------
 # Logging setup
@@ -107,15 +107,8 @@ def create_app() -> FastAPI:
     app.include_router(models.router,          prefix=f"{prefix}/models")
     app.include_router(system.router,          prefix=f"{prefix}/system")
     app.include_router(audit.router,           prefix=f"{prefix}/audit")
-    app.include_router(documents.router,       prefix=f"{prefix}/documents")
-    app.include_router(knowledge_bases.router, prefix=f"{prefix}/knowledge-bases")
-    app.include_router(agents.router,          prefix=f"{prefix}/agents")
-    app.include_router(approvals.router,       prefix=f"{prefix}/approvals")
     app.include_router(settings_router.router, prefix=f"{prefix}/settings")
     app.include_router(providers.router,       prefix=f"{prefix}/models/providers")
-    app.include_router(tools_router.router,    prefix=f"{prefix}/tools")
-    app.include_router(plugins_router.router,  prefix=f"{prefix}/plugins")
-    app.include_router(data_router.router,     prefix=f"{prefix}/data")
 
     # ---- Exception handlers ----
     @app.exception_handler(RequestValidationError)

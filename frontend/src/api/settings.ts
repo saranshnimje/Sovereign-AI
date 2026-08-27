@@ -19,6 +19,10 @@ export interface DashboardSummary {
   agent_run_count: number
   pending_approval_count: number
   total_audit_events: number
+  sensor_analysis_count: number
+  incident_count: number
+  critical_risk_count: number
+  high_risk_count: number
 }
 
 export interface ActivityItem {
@@ -84,6 +88,17 @@ export const auditApi = {
 export const activityApi = {
   recent: (limit = 10) =>
     api.get<{ items: ActivityItem[] }>(`/system/activity?limit=${limit}`).then(r => r.data),
+}
+
+export interface KnowledgeBaseItem {
+  id: string
+  name: string
+  doc_count: number
+  created_at: string | null
+}
+
+export const knowledgeBaseApi = {
+  list: () => api.get<KnowledgeBaseItem[]>('/settings/knowledge-bases').then(r => r.data),
 }
 
 export const approvalBadgeApi = {

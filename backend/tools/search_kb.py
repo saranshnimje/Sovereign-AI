@@ -27,6 +27,7 @@ class SearchKBOutput(BaseModel):
     results: list[dict]
     found: bool
     count: int
+    note: str | None = None
 
 
 async def execute(inp: SearchKBInput, context: dict) -> dict:
@@ -36,13 +37,27 @@ async def execute(inp: SearchKBInput, context: dict) -> dict:
             results=[], found=False, count=0
         ).model_dump()
 
-    # Get KB info for embedding model
+    # --- Tenancy enforcement ---
+    # The LLM supplies kb_id; it MUST be scoped to the requesting user.
+    # Unauthorized or unknown KBs produce an honest "not found" result
+    # (no exception, no data, no existence signal beyond emptiness).
+    user = context.get("user")
     kb_service = context.get("kb_service")
     embedding_model = "nomic-embed-text"
     if kb_service:
         try:
             kb = await kb_service.get(inp.kb_id)
             embedding_model = kb.embedding_model
+            if user is not None:
+                from fastapi import HTTPException
+
+                from services.kb_access import ensure_kb_access
+                ensure_kb_access(kb, user)  # raises 404-shaped HTTPException on foreign KBs
+        except HTTPException:
+            return SearchKBOutput(
+                results=[], found=False, count=0,
+                note="Knowledge base not found",
+            ).model_dump()
         except Exception:
             pass
 
