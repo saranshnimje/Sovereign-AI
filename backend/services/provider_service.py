@@ -9,6 +9,7 @@ Security invariants:
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -65,6 +66,19 @@ def _sanitize(msg: str, api_key: str | None) -> str:
     return msg
 
 
+def _parse_custom_headers(raw: str | None) -> dict[str, str] | None:
+    """Parse custom_headers JSON string from DB, return dict or None."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
 def _to_response(p: LLMProvider, model_count: int | None = None) -> ProviderResponse:
     """Convert ORM object to safe schema — api_key deliberately excluded."""
     return ProviderResponse(
@@ -75,12 +89,12 @@ def _to_response(p: LLMProvider, model_count: int | None = None) -> ProviderResp
         base_url=p.base_url,
         model_name=p.model_name or "",
         has_api_key=bool(p.api_key),   # boolean only — never the key
-        # SECURITY: masked hint only (last 4 chars max) — never the full key
         api_key_masked=_mask_key(p.api_key),
         enabled=p.enabled,
         supports_streaming=p.supports_streaming,
         supports_embeddings=p.supports_embeddings,
         description=p.description,
+        custom_headers=_parse_custom_headers(p.custom_headers),
         model_count=model_count if model_count is not None else 0,
         created_at=p.created_at,
         updated_at=p.updated_at,
@@ -118,14 +132,13 @@ class ProviderService:
             provider_type=data.provider_type,
             environment=data.environment,
             base_url=data.base_url,
-            # Providers store connection info only. Legacy column kept NOT NULL in
-            # existing DBs, so an empty string means "no pinned model".
             model_name=data.model_name or "",
-            api_key=data.api_key,       # stored; never returned
+            api_key=data.api_key,
             enabled=data.enabled,
             supports_streaming=data.supports_streaming,
             supports_embeddings=data.supports_embeddings,
             description=data.description,
+            custom_headers=json.dumps(data.custom_headers) if data.custom_headers else None,
         )
         self.db.add(p)
         await self.db.flush()
@@ -187,6 +200,8 @@ class ProviderService:
             p.supports_embeddings = data.supports_embeddings
         if data.description is not None:
             p.description = data.description
+        if data.custom_headers is not None:
+            p.custom_headers = json.dumps(data.custom_headers) if data.custom_headers else None
         await self.db.flush()
 
         # Re-fetch to get server-generated updated_at without triggering MissingGreenlet
@@ -241,6 +256,7 @@ class ProviderService:
                 provider_type=p.provider_type,
                 base_url=p.base_url,
                 api_key=p.api_key,
+                custom_headers=_parse_custom_headers(p.custom_headers),
             )
             ok, latency = await client.health_check(p.model_name or None)
             if not ok:
@@ -331,6 +347,7 @@ class ProviderService:
                 provider_type=p.provider_type,
                 base_url=p.base_url,
                 api_key=p.api_key,
+                custom_headers=_parse_custom_headers(p.custom_headers),
             )
             # Adapter list_models() implementations are intentionally lenient
             # (used by dashboards) and may swallow connection errors as [].

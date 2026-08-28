@@ -57,6 +57,7 @@ def resolve_llm_for_role_async(db: AsyncSession, role: str):
             provider_type=provider.provider_type,
             base_url=provider.base_url,
             api_key=provider.api_key,
+            custom_headers=provider.custom_headers if hasattr(provider, 'custom_headers') and provider.custom_headers else None,
         )
 
     return _resolve()

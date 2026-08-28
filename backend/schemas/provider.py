@@ -6,6 +6,7 @@ SECURITY: api_key is WRITE-ONLY.
 - ProviderCreate / ProviderUpdate accept api_key for write operations only.
 - has_api_key (bool) is included in responses so the UI can show a masked indicator.
 """
+import json
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, field_validator
 from models.provider import PROVIDER_TYPES, PROVIDER_ENVIRONMENTS
@@ -19,14 +20,13 @@ class ProviderCreate(BaseModel):
     provider_type: str
     environment: str = "local"
     base_url: str | None = None
-    # A provider stores CONNECTION info only — model_name is NOT required.
-    # Models are auto-discovered from the provider via GET /providers/{id}/models.
     model_name: str | None = None
     api_key: str | None = None       # write-only — never returned
     enabled: bool = True
     supports_streaming: bool = True
     supports_embeddings: bool = False
     description: str | None = None
+    custom_headers: dict[str, str] | None = None  # e.g. {"X-Title": "MyApp"}
 
     @field_validator("name")
     @classmethod
@@ -75,6 +75,7 @@ class ProviderUpdate(BaseModel):
     supports_streaming: bool | None = None
     supports_embeddings: bool | None = None
     description: str | None = None
+    custom_headers: dict[str, str] | None = None  # None = don't change, {} = clear
 
 
 class ProviderResponse(BaseModel):
@@ -90,7 +91,6 @@ class ProviderResponse(BaseModel):
     provider_type: str
     environment: str
     base_url: str | None
-    # Legacy pinned model ("" when the provider relies on auto-discovery only)
     model_name: str = ""
     has_api_key: bool         # True if an api_key is stored; never the key itself
     api_key_masked: str | None = None   # "••••••••abcd" — last 4 chars max
@@ -98,6 +98,7 @@ class ProviderResponse(BaseModel):
     supports_streaming: bool
     supports_embeddings: bool
     description: str | None
+    custom_headers: dict[str, str] | None = None  # returned for display (no secrets in header values)
     model_count: int = 0      # discovered models persisted for this provider
     created_at: datetime
     updated_at: datetime

@@ -122,6 +122,7 @@ async def send_message(
             provider_type=provider.provider_type,
             base_url=provider.base_url,
             api_key=provider.api_key,
+            custom_headers=provider.custom_headers if hasattr(provider, 'custom_headers') and provider.custom_headers else None,
         )
         svc = ChatService(db, llm)
     else:
@@ -280,7 +281,8 @@ async def send_agent_message(
                 raise HTTPException(404, "Provider not found")
             if not prov.enabled:
                 raise HTTPException(400, "Provider is disabled")
-            llm = _build(prov.provider_type, prov.base_url, prov.api_key)
+            llm = _build(prov.provider_type, prov.base_url, prov.api_key,
+                         custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None)
             model_label = f"{prov.name} / {data.model_name or prov.model_name}"
         else:
             llm = await resolve_llm_for_role_async(session, "chat")
