@@ -53,8 +53,11 @@ async def list_approvals(
             operation_detail=json.loads(r.operation_detail_json),
             risk_level=r.risk_level,
             status=r.status,
+            decided_by=r.decided_by,
+            decided_at=r.decided_at,
+            decision_note=r.decision_note,
+            expires_at=r.expires_at,
             created_at=r.created_at,
-            updated_at=r.updated_at,
         )
         for r in requests_list
     ]
