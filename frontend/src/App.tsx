@@ -14,6 +14,13 @@ import ChatPage from './pages/ChatPage'
 import AuditPage from './pages/AuditPage'
 import ModelsPage from './pages/ModelsPage'
 import ProvidersPage from './pages/ProvidersPage'
+import KnowledgeBasesPage from './pages/KnowledgeBasesPage'
+import AgentsPage from './pages/AgentsPage'
+import ToolsPage from './pages/ToolsPage'
+import IncidentsPage from './pages/IncidentsPage'
+import DataPage from './pages/DataPage'
+import ApprovalsPage from './pages/ApprovalsPage'
+import SettingsPage from './pages/SettingsPage'
 
 // ------------------------------------------------------------------
 // Protected route wrapper — redirects to /login if not authed
@@ -54,7 +61,6 @@ function AppBootstrap({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (accessToken) {
-      // Already have token — just fetch user
       authApi
         .me()
         .then((u) => setUser(u))
@@ -63,29 +69,22 @@ function AppBootstrap({ children }: { children: React.ReactNode }) {
       return
     }
 
-    // Try refresh (uses httpOnly cookie)
-    // Wrap in try/catch so a missing/expired cookie doesn't log a console error
     api.post('/auth/refresh')
       .then((r) => {
         setToken(r.data.access_token)
         return authApi.me()
       })
       .then((u) => setUser(u))
-      .catch(() => {
-        // No valid session — login page will handle this silently
-      })
+      .catch(() => {})
       .finally(() => setReady(true))
   }, [])
 
   if (!ready) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-neutral-50 dark:bg-neutral-900">
+      <div className="min-h-screen flex items-center justify-center bg-navy-950">
         <div className="text-center">
-          <div className="text-4xl mb-3">🛡️</div>
-          <div
-            className="animate-spin h-6 w-6 border-2 border-primary-600 border-t-transparent rounded-full mx-auto"
-            aria-label="Loading"
-          />
+          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-cyan-500 to-cyan-700 flex items-center justify-center text-white font-bold text-lg mx-auto mb-3 shadow-glow-cyan">S</div>
+          <div className="animate-spin h-6 w-6 border-2 border-cyan-500 border-t-transparent rounded-full mx-auto" aria-label="Loading" />
         </div>
       </div>
     )
@@ -116,6 +115,14 @@ export default function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/chat/:convId" element={<ChatPage />} />
+            <Route path="/knowledge" element={<KnowledgeBasesPage />} />
+            <Route path="/agents" element={<AgentsPage />} />
+            <Route path="/models" element={<ModelsPage />} />
+            <Route path="/providers" element={<ProvidersPage />} />
+            <Route path="/tools" element={<ToolsPage />} />
+            <Route path="/incidents" element={<IncidentsPage />} />
+            <Route path="/data" element={<DataPage />} />
+            <Route path="/approvals" element={<ApprovalsPage />} />
             <Route
               path="/audit"
               element={
@@ -124,8 +131,14 @@ export default function App() {
                 </RequireRole>
               }
             />
-            <Route path="/models" element={<ModelsPage />} />
-            <Route path="/providers" element={<ProvidersPage />} />
+            <Route
+              path="/settings"
+              element={
+                <RequireRole roles={['admin']}>
+                  <SettingsPage />
+                </RequireRole>
+              }
+            />
 
             {/* 404 fallback */}
             <Route path="*" element={<Navigate to="/" replace />} />

@@ -2,6 +2,7 @@
 import asyncio
 import json as _json
 import logging
+import time as _time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -18,6 +19,26 @@ from utils.rate_limit import ai_rate_limit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["chat"])
+
+# --- In-memory stream tracker ---
+# Maps conv_id -> {user_id, started_at, type}
+_active_streams: dict[str, dict] = {}
+
+
+def _track_stream(conv_id: str, user_id: str, stream_type: str = "direct"):
+    _active_streams[conv_id] = {
+        "user_id": user_id,
+        "started_at": _time.time(),
+        "type": stream_type,
+    }
+
+
+def _untrack_stream(conv_id: str):
+    _active_streams.pop(conv_id, None)
+
+
+def get_active_streams_for_user(user_id: str) -> list[str]:
+    return [cid for cid, info in _active_streams.items() if info["user_id"] == user_id]
 
 
 async def _get_chat_service(
@@ -65,6 +86,32 @@ async def delete_conversation(
 ):
     await svc.delete_conversation(conv_id, current_user.id)
     return Response(status_code=204)
+
+
+@router.get("/conversations/{conv_id}/status")
+async def get_conversation_status(
+    conv_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Check if a conversation has an active stream running."""
+    # Verify ownership
+    from models.conversation import Conversation
+    res = await db.execute(
+        select(Conversation).where(
+            Conversation.id == conv_id, Conversation.user_id == current_user.id
+        )
+    )
+    conv = res.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(404, "Conversation not found")
+
+    active = _active_streams.get(conv_id)
+    return {
+        "active": active is not None,
+        "type": active["type"] if active else None,
+        "started_at": active["started_at"] if active else None,
+    }
 
 
 @router.post("/conversations/{conv_id}/messages")
@@ -208,12 +255,20 @@ async def send_message(
             logger.warning("RAG setup failed: %s", exc)
             # Continue without RAG — honest degradation
 
+    async def _tracked_stream():
+        _track_stream(conv_id, current_user.id, "direct")
+        try:
+            async for chunk in svc.stream_message(
+                conv_id, current_user.id, data,
+                rag_sources=rag_sources,
+                rag_context=rag_context,
+            ):
+                yield chunk
+        finally:
+            _untrack_stream(conv_id)
+
     return StreamingResponse(
-        svc.stream_message(
-            conv_id, current_user.id, data,
-            rag_sources=rag_sources,
-            rag_context=rag_context,
-        ),
+        _tracked_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -363,19 +418,26 @@ async def send_agent_message(
             )
         else:
             system_prompt = (
-                "You are Sovereign AI Workbench's AI assistant. You have access to tools.\n\n"
+                "You are Sovereign AI Workbench's AI assistant with access to tools.\n\n"
                 "Available tools:\n"
                 + tool_descriptions + "\n\n"
-                "RESPONSE FORMAT:\n"
-                "To use a tool, respond with EXACTLY this JSON (no markdown fences):\n"
+                "HOW TO DECIDE:\n"
+                "- If the user asks something you already know with certainty -> answer directly\n"
+                "- If the user asks about current/recent events, news, dates, people in office, "
+                "prices, weather, scores -> use web_search\n"
+                "- If the user asks about an organization, company, employee, department, "
+                "or any company-related information -> use search_org_data first, "
+                "then use web_search for the latest/recent data\n"
+                "- If the user asks to search documents/knowledge base -> use search_kb\n"
+                "- If the user asks to calculate something -> use calculator\n"
+                "- If the user gives you a URL to read -> use web_fetch\n"
+                "- If unsure, use the most relevant tool to get accurate information\n\n"
+                "COMBINE TOOLS: For organization questions, first search internal data with "
+                "search_org_data, then use web_search for the latest public information. "
+                "Combine both sources for a complete answer.\n\n"
+                "To use a tool, respond with ONLY this JSON:\n"
                 '{"tool_call": {"tool": "TOOL_NAME", "input": {...}, "reasoning": "why"}}\n\n'
-                "To create a plan for a complex task, respond with:\n"
-                '{"plan": {"goal": "...", "steps": [{"description": "...", "tool_name": "TOOL_NAME"}, ...]}}\n\n'
-                "To verify your work before finalizing, respond with:\n"
-                '{"verification": {"task_completed": true/false, "evidence": ["..."], "issues": ["..."]}}\n\n'
-                "When you have enough information to answer, respond normally with your final answer.\n"
-                "Do NOT fabricate tool results. If a tool returns an error, report it honestly.\n"
-                "Every statement in your final answer must be grounded in actual tool results.\n"
+                "When you have enough info, just answer normally. Be helpful and accurate.\n"
             )
 
         messages: list[_ChatMessage] = []
@@ -404,12 +466,15 @@ async def send_agent_message(
             if tool_mode != "none" and tool_names:
                 try:
                     planning_prompt = (
-                        f"Create a plan for this task: {data.content}\n\n"
+                        f"Task: {data.content}\n\n"
                         f"Available tools: {', '.join(tool_names)}\n\n"
-                        "Respond with a JSON plan. Use the format:\n"
+                        "Think step by step:\n"
+                        "1. What does the user want?\n"
+                        "2. Do I need any tool to answer this accurately?\n"
+                        "3. If yes, which tool(s) and what input?\n\n"
+                        "Respond with a JSON plan:\n"
                         '{"plan": {"goal": "...", "steps": [{"description": "...", "tool_name": "TOOL_NAME or null"}, ...]}}\n\n'
-                        "Keep the plan concise (max 5 steps). Focus on what tools to use.\n"
-                        "If no tools are needed, create a simple 1-step plan with tool_name null.\n"
+                        "Keep it simple (max 3 steps). If you can answer from knowledge, use one step with tool_name null.\n"
                     )
                     messages.append(_ChatMessage(role="user", content=planning_prompt))
 
@@ -867,7 +932,15 @@ async def send_agent_message(
 
         await session.close()
 
-    return StreamingResponse(_gen(), media_type="text/event-stream",
+    async def _tracked_agent_gen():
+        _track_stream(conv_id, current_user.id, "agent")
+        try:
+            async for chunk in _gen():
+                yield chunk
+        finally:
+            _untrack_stream(conv_id)
+
+    return StreamingResponse(_tracked_agent_gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
 

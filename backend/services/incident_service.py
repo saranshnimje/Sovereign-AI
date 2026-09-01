@@ -276,3 +276,233 @@ def extract_action(ai_text: str | None) -> str | None:
             action = line[len("ACTION:"):].strip()
             return action[:500] if action else None
     return None
+
+
+# ----------------------------------------------------------------------
+# IncidentService class — CRUD + investigation orchestration
+# ----------------------------------------------------------------------
+import logging
+from datetime import datetime, timezone
+
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models.incident import Incident
+from services.audit_service import AuditService
+
+logger = logging.getLogger(__name__)
+
+
+class IncidentService:
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def list_incidents(
+        self,
+        user_id: str,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Incident]:
+        query = select(Incident).order_by(Incident.created_at.desc())
+        if status:
+            query = query.where(Incident.status == status)
+        # Non-admin users see only their own incidents
+        # (ownership check happens at router level; here we trust the caller)
+        result = await self.db.execute(query.offset(offset).limit(limit))
+        return list(result.scalars().all())
+
+    async def get(self, incident_id: str) -> Incident:
+        result = await self.db.execute(
+            select(Incident).where(Incident.id == incident_id)
+        )
+        inc = result.scalar_one_or_none()
+        if not inc:
+            raise HTTPException(404, "Incident not found")
+        return inc
+
+    async def create(
+        self,
+        owner_id: str,
+        title: str,
+        machine: str,
+        asset_tag: str | None,
+        description: str,
+        kb_id: str | None,
+        sensor_analysis_id: str | None,
+    ) -> Incident:
+        inc = Incident(
+            owner_id=owner_id,
+            title=title,
+            machine=machine,
+            asset_tag=asset_tag,
+            description=description,
+            kb_id=kb_id,
+            sensor_analysis_id=sensor_analysis_id,
+        )
+        self.db.add(inc)
+        await self.db.flush()
+        audit = AuditService(self.db)
+        await audit.log(
+            "incident", "incident.created", "success",
+            user_id=owner_id,
+            resource_type="incident", resource_id=inc.id,
+        )
+        return inc
+
+    async def update(
+        self,
+        incident_id: str,
+        title: str | None,
+        machine: str | None,
+        asset_tag: str | None,
+        description: str | None,
+        kb_id: str | None,
+        sensor_analysis_id: str | None,
+    ) -> Incident:
+        inc = await self.get(incident_id)
+        if title is not None:
+            inc.title = title
+        if machine is not None:
+            inc.machine = machine
+        if asset_tag is not None:
+            inc.asset_tag = asset_tag
+        if description is not None:
+            inc.description = description
+        if kb_id is not None:
+            inc.kb_id = kb_id
+        if sensor_analysis_id is not None:
+            inc.sensor_analysis_id = sensor_analysis_id
+        await self.db.flush()
+        return inc
+
+    async def investigate(self, incident_id: str) -> dict:
+        """
+        Run AI investigation on an incident.
+        Gathers evidence, computes risk, calls LLM, stores results.
+        """
+        from services.knowledge_base_service import KnowledgeBaseService
+        from services.qdrant_service import QdrantService
+        from services.rag_service import RagService
+        from services.embedding_service import EmbeddingService
+        from services.llm_client import OllamaClient
+        from services.settings_service import load_settings
+        from models.sensor import SensorAnalysis
+        import json
+
+        inc = await self.get(incident_id)
+        if inc.status not in ("created", "failed"):
+            raise HTTPException(400, f"Incident is in '{inc.status}' state; only 'created' or 'failed' incidents can be investigated")
+
+        inc.status = "analyzing"
+        await self.db.flush()
+
+        try:
+            # Gather sensor evidence
+            sensor_payload = None
+            if inc.sensor_analysis_id:
+                result = await self.db.execute(
+                    select(SensorAnalysis).where(SensorAnalysis.id == inc.sensor_analysis_id)
+                )
+                sa = result.scalar_one_or_none()
+                if sa and sa.result_json:
+                    sensor_payload = json.loads(sa.result_json)
+
+            # Gather document evidence via RAG
+            doc_sources = []
+            if inc.kb_id:
+                from models.knowledge_base import KnowledgeBase
+                kb_result = await self.db.execute(
+                    select(KnowledgeBase).where(KnowledgeBase.id == inc.kb_id)
+                )
+                kb = kb_result.scalar_one_or_none()
+                if kb:
+                    settings = load_settings()
+                    llm = OllamaClient(settings.ollama_url)
+                    embed_svc = EmbeddingService(llm)
+                    qdrant_svc = QdrantService()
+                    rag_svc = RagService(llm, embed_svc, qdrant_svc)
+                    rag_result = await rag_svc.query(
+                        kb_id=inc.kb_id,
+                        embedding_model=kb.embedding_model,
+                        chat_model=settings.default_chat_model if hasattr(settings, 'default_chat_model') else "llama3",
+                        query=inc.description,
+                        top_k=settings.default_top_k,
+                        score_threshold=settings.default_score_threshold,
+                        generate_answer=False,
+                    )
+                    doc_sources = [
+                        {
+                            "chunk_id": s.chunk_id,
+                            "doc_id": s.doc_id,
+                            "filename": s.filename,
+                            "page_number": s.page_number,
+                            "content": s.content,
+                            "score": s.score,
+                        }
+                        for s in rag_result.sources
+                    ]
+
+            # Build evidence and risk assessment
+            evidence = build_evidence(doc_sources, sensor_payload, inc.sensor_analysis_id)
+            risk = assess_risk(sensor_payload)
+
+            # Store evidence and risk
+            inc.evidence_json = json.dumps(evidence)
+            inc.risk_json = json.dumps(risk)
+
+            # Generate AI investigation
+            settings = load_settings()
+            llm = OllamaClient(settings.ollama_url)
+            system_prompt, user_prompt = build_investigation_prompt(
+                inc.description, inc.machine, inc.asset_tag, evidence, risk
+            )
+
+            # Call LLM
+            response = await llm.chat(
+                model=settings.default_chat_model if hasattr(settings, 'default_chat_model') else "llama3",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            ai_text = response.get("content", "")
+            inc.ai_model = settings.default_chat_model if hasattr(settings, 'default_chat_model') else "llama3"
+            inc.ai_analysis = ai_text
+            inc.recommendation_action = extract_action(ai_text)
+            inc.recommendation_risk_level = risk.get("level")
+            inc.requires_approval = risk.get("level") in ("high", "critical")
+            inc.status = "completed"
+
+            await self.db.flush()
+
+            audit = AuditService(self.db)
+            await audit.log(
+                "incident", "incident.investigated", "success",
+                resource_type="incident", resource_id=inc.id,
+                metadata={"risk_level": risk.get("level")},
+            )
+
+            return {
+                "status": "completed",
+                "evidence": evidence,
+                "risk": risk,
+                "analysis": ai_text,
+                "action": inc.recommendation_action,
+                "requires_approval": inc.requires_approval,
+            }
+
+        except Exception as exc:
+            logger.exception("Investigation failed for incident %s: %s", incident_id, exc)
+            inc.status = "failed"
+            inc.error_message = str(exc)[:1000]
+            await self.db.flush()
+
+            audit = AuditService(self.db)
+            await audit.log(
+                "incident", "incident.investigation.failed", "failure",
+                resource_type="incident", resource_id=incident_id,
+                metadata={"error": str(exc)[:500]},
+            )
+            raise HTTPException(500, f"Investigation failed: {exc}")

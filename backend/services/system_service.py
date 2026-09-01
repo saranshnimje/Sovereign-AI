@@ -57,11 +57,11 @@ async def get_system_status() -> SystemStatus:
     # --- Resource metrics ---
     resources = _get_resource_metrics()
 
-    # --- Loaded models ---
+    # --- Loaded models (currently running in memory) ---
     models_loaded: list[str] = []
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(settings.ollama_url + "/api/tags")
+            resp = await client.get(settings.ollama_url + "/api/ps")
         if resp.status_code == 200:
             models_loaded = [m["name"] for m in resp.json().get("models", [])]
     except Exception:

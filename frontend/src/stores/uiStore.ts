@@ -17,11 +17,12 @@ export interface Toast {
   message?: string
 }
 
-const savedDark = localStorage.getItem('darkMode') === 'true'
+const savedDark = localStorage.getItem('darkMode')
+const isDark = savedDark === null ? true : savedDark === 'true'
 
 export const useUIStore = create<UIState>((set) => ({
   sidebarOpen: true,
-  darkMode: savedDark,
+  darkMode: isDark,
   toasts: [],
 
   setSidebarOpen: (v) => set({ sidebarOpen: v }),
@@ -38,7 +39,6 @@ export const useUIStore = create<UIState>((set) => ({
   addToast: (toast) => {
     const id = crypto.randomUUID()
     set((s) => ({ toasts: [...s.toasts, { ...toast, id }] }))
-    // Auto-dismiss: errors after 8s, others after 5s
     const delay = toast.type === 'error' ? 8000 : 5000
     setTimeout(() => {
       set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
@@ -49,5 +49,4 @@ export const useUIStore = create<UIState>((set) => ({
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }))
 
-// Apply saved dark mode on load
-if (savedDark) document.documentElement.classList.add('dark')
+if (isDark) document.documentElement.classList.add('dark')

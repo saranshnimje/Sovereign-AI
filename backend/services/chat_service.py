@@ -192,8 +192,30 @@ class ChatService:
                 yield _sse_token(token)
 
         except asyncio.CancelledError:
-            # Client disconnected — abort cleanly, do not save partial message
+            # Client disconnected — save partial content so the user sees progress
             logger.info("Chat stream cancelled by client disconnect (conv=%s)", conv_id)
+            if full_content:
+                metadata: dict[str, Any] = {
+                    "local": True, "model": model, "partial": True,
+                }
+                if sources:
+                    metadata["evidence"] = _build_evidence_payload(sources)
+                assistant_msg = Message(
+                    conversation_id=conv_id,
+                    role="assistant",
+                    content=full_content,
+                    token_count=token_count,
+                    finish_reason="cancelled",
+                    metadata_json=json.dumps(metadata, default=str),
+                )
+                self.db.add(assistant_msg)
+                from datetime import datetime as _dt, timezone as _tz
+                conv.updated_at = _dt.now(_tz.utc)
+                try:
+                    await self.db.flush()
+                    await self.db.commit()
+                except Exception:
+                    logger.warning("Partial message commit failed", exc_info=True)
             yield _sse_error("cancelled", "Generation cancelled")
             return
         except ModelUnavailableError as exc:

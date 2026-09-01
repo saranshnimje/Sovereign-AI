@@ -1,18 +1,25 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   html {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
       'Helvetica Neue', Arial, sans-serif;
+  }
+
+  body {
+    @apply bg-navy-950 text-neutral-100 antialiased;
   }
 }
 
-/* Streaming cursor */
+/* ── Streaming cursor ──────────────────────────────────────────── */
 .streaming-cursor::after {
   content: '▋';
   animation: blink 0.8s step-end infinite;
+  color: #22d3ee;
 }
 
 @keyframes blink {
@@ -20,7 +27,7 @@
   50% { opacity: 0; }
 }
 
-/* Line clamp utility for citation previews */
+/* ── Line clamp utilities ──────────────────────────────────────── */
 .line-clamp-2 {
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -34,12 +41,59 @@
   overflow: hidden;
 }
 
-/* Scrollbar styling */
+/* ── Scrollbar styling ─────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #1e2d4a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #243352; }
 
-/* Reduce motion */
+/* ── Card glow effect ──────────────────────────────────────────── */
+.card-glow {
+  position: relative;
+}
+.card-glow::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.2), transparent 50%);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.card-glow:hover::before {
+  opacity: 1;
+}
+
+/* ── Pulse animation for running indicators ────────────────────── */
+@keyframes pulse-cyan {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(6, 182, 212, 0); }
+}
+.animate-pulse-cyan {
+  animation: pulse-cyan 2s infinite;
+}
+
+/* ── Skeleton loading animation ────────────────────────────────── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #111a2e 25%, #162033 50%, #111a2e 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 0.5rem;
+}
+
+/* ── Reduce motion ─────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .animate-pulse, .animate-spin, .streaming-cursor::after { animation: none !important; }
+  .animate-pulse, .animate-spin, .animate-pulse-cyan,
+  .streaming-cursor::after { animation: none !important; }
+  .skeleton { animation: none !important; }
 }

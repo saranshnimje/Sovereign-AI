@@ -28,20 +28,28 @@ export default function LoginPage() {
     } finally { setLoading(false) }
   }
 
-  const inputCls = "w-full rounded-lg border border-green-900/40 bg-[#050e05] px-3 py-2.5 text-sm text-neutral-200 placeholder-neutral-600 shadow-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+  const inputCls = "w-full rounded-lg border border-surface-border bg-surface px-3 py-2.5 text-sm text-neutral-200 placeholder-neutral-600 shadow-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition-colors"
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#050e05] p-4">
-      <div className="w-full max-w-md">
+    <div className="min-h-screen flex items-center justify-center bg-navy-950 p-4">
+      {/* Background decoration */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-cyan-500/5 rounded-full blur-3xl" />
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-navy-500/10 rounded-full blur-3xl" />
+      </div>
+
+      <div className="w-full max-w-md relative">
         <div className="text-center mb-8">
-          <div className="text-5xl mb-3">🛡️</div>
+          <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-700 flex items-center justify-center text-white font-bold text-xl mx-auto mb-4 shadow-glow-cyan">
+            S
+          </div>
           <h1 className="text-2xl font-bold text-white">Sovereign AI Workbench</h1>
-          <p className="text-sm text-neutral-500 mt-1">Privacy-first on-premise AI platform</p>
+          <p className="text-sm text-neutral-400 mt-1">Privacy-first on-premise AI platform</p>
         </div>
 
-        <div className="bg-[#0a1a0a] border border-green-900/40 rounded-xl shadow-xl p-8">
+        <div className="bg-surface-raised border border-surface-border rounded-xl shadow-xl p-8">
           {setupMode && (
-            <div className="mb-6 p-3 bg-green-900/20 border border-green-800/30 rounded-lg text-sm text-green-400">
+            <div className="mb-6 p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-lg text-sm text-cyan-400">
               <strong>First-time setup</strong> — Create your administrator account.
             </div>
           )}
@@ -51,7 +59,7 @@ export default function LoginPage() {
           </h2>
 
           {error && (
-            <div className="mb-4 p-3 bg-red-900/20 border border-red-800/40 rounded-lg text-sm text-red-400" role="alert">{error}</div>
+            <div className="mb-4 p-3 bg-danger-500/10 border border-danger-500/30 rounded-lg text-sm text-danger-500" role="alert">{error}</div>
           )}
 
           <form onSubmit={handleSubmit} noValidate>
@@ -78,11 +86,11 @@ export default function LoginPage() {
             </div>
 
             <button type="submit" disabled={loading}
-              className="w-full bg-green-600 text-white rounded-lg py-2.5 px-4 text-sm font-medium hover:bg-green-500 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 focus:ring-offset-[#0a1a0a] disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              className="w-full bg-cyan-600 text-white rounded-lg py-2.5 px-4 text-sm font-medium hover:bg-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-surface-raised disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-cyan-900/30">
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
                   <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
-                  {setupMode ? 'Creating account…' : 'Signing in…'}
+                  {setupMode ? 'Creating account...' : 'Signing in...'}
                 </span>
               ) : (setupMode ? 'Create Account & Sign In' : 'Sign In')}
             </button>
@@ -93,7 +101,7 @@ export default function LoginPage() {
           )}
         </div>
 
-        <p className="text-center text-xs text-neutral-600 mt-4">🔒 All AI processing runs locally — no data leaves your network.</p>
+        <p className="text-center text-xs text-neutral-600 mt-4">All AI processing runs locally — no data leaves your network.</p>
       </div>
     </div>
   )

@@ -13,6 +13,7 @@ from models.base import TimestampMixin, generate_uuid
 
 # Supported provider type identifiers
 PROVIDER_OLLAMA             = "ollama"
+PROVIDER_OLLAMA_DOCKER      = "ollama_docker"
 PROVIDER_OPENAI             = "openai"
 PROVIDER_ANTHROPIC          = "anthropic"
 PROVIDER_GEMINI             = "gemini"
@@ -38,6 +39,7 @@ PROVIDER_OLLAMA_COMPATIBLE  = "ollama_compatible"
 
 PROVIDER_TYPES = [
     PROVIDER_OLLAMA,
+    PROVIDER_OLLAMA_DOCKER,
     PROVIDER_OPENAI,
     PROVIDER_ANTHROPIC,
     PROVIDER_GEMINI,
@@ -75,8 +77,21 @@ PROVIDER_ENVIRONMENTS = ["local", "cloud", "custom"]
 PROVIDER_PRESETS: list[dict] = [
     {
         "id": PROVIDER_OLLAMA,
-        "label": "Ollama",
-        "description": "Local models on your own machine — fully offline, no data leaves your network.",
+        "label": "Ollama (Local Machine)",
+        "description": "Ollama running on your system — fully offline, no data leaves your network.",
+        "provider_type": PROVIDER_OLLAMA,
+        "environment": "local",
+        "default_base_url": "http://host.docker.internal:11434",
+        "requires_api_key": False,
+        "api_key_hint": None,
+        "api_key_url": None,
+        "supports_discovery": True,
+        "adapter": "OllamaProvider",
+    },
+    {
+        "id": PROVIDER_OLLAMA_DOCKER,
+        "label": "Ollama (Docker)",
+        "description": "Ollama running inside Docker — for containerized deployments.",
         "provider_type": PROVIDER_OLLAMA,
         "environment": "local",
         "default_base_url": "http://ollama:11434",

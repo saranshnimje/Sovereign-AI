@@ -191,6 +191,7 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
     from tools import search_kb, calculator, python_exec
     from tools import web, meta_tools
     from tools import system_status, sensor_tool, vision_tool, incident_tool
+    from tools import org_search
 
     reg.register(ToolDefinition(
         name="file_read",
@@ -495,4 +496,24 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
         category="domain",
         version="1.0.0",
         permissions=["incident_read"],
+    ))
+
+    reg.register(ToolDefinition(
+        name="search_org_data",
+        description=(
+            "Search organization data: company profiles, employee details, "
+            "departments, contacts, infrastructure, and financials. "
+            "Use this when the user asks about a specific organization, "
+            "its employees, departments, or any company-related information."
+        ),
+        input_schema=org_search.OrgSearchInput,
+        output_schema=org_search.OrgSearchOutput,
+        risk_level=RISK_LOW,
+        required_role=ROLE_ANALYST,
+        requires_sandbox=False,
+        handler=org_search.execute,
+        tags=["organization", "data", "search"],
+        category="domain",
+        version="1.0.0",
+        permissions=[],
     ))

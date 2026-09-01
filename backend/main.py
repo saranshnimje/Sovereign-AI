@@ -15,7 +15,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from config import get_settings
 from database import init_db
-from routers import auth, chat, models, system, audit, providers, settings as settings_router
+from routers import (
+    auth, chat, models, system, audit, providers, settings as settings_router,
+    knowledge_bases, agents, tools, incidents, data, approvals,
+)
 
 # ------------------------------------------------------------------
 # Logging setup
@@ -42,13 +45,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialised")
 
-    # Seed the default Ollama provider entry if none exist
-    from database import AsyncSessionLocal
-    from services.provider_service import ProviderService
-    async with AsyncSessionLocal() as seed_db:
-        svc = ProviderService(seed_db)
-        await svc.seed_default_ollama(settings.ollama_url)
-        await seed_db.commit()
+    # NOTE: Default Ollama provider seeding removed — users configure providers manually
     yield
     logger.info("Shutdown complete")
 
@@ -109,6 +106,12 @@ def create_app() -> FastAPI:
     app.include_router(audit.router,           prefix=f"{prefix}/audit")
     app.include_router(settings_router.router, prefix=f"{prefix}/settings")
     app.include_router(providers.router,       prefix=f"{prefix}/models/providers")
+    app.include_router(knowledge_bases.router, prefix=f"{prefix}/knowledge-bases")
+    app.include_router(agents.router,          prefix=f"{prefix}/agents")
+    app.include_router(tools.router,           prefix=f"{prefix}/tools")
+    app.include_router(incidents.router,       prefix=f"{prefix}/incidents")
+    app.include_router(data.router,            prefix=f"{prefix}/data")
+    app.include_router(approvals.router,       prefix=f"{prefix}/approvals")
 
     # ---- Exception handlers ----
     @app.exception_handler(RequestValidationError)

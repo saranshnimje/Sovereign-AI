@@ -1,10 +1,10 @@
 import { useUIStore } from '../../stores/uiStore'
 
 const STYLES: Record<string, string> = {
-  success: 'bg-green-900/90 border-l-4 border-green-500 text-green-200',
-  error:   'bg-red-900/90 border-l-4 border-red-500 text-red-200',
-  warning: 'bg-yellow-900/90 border-l-4 border-yellow-500 text-yellow-200',
-  info:    'bg-blue-900/90 border-l-4 border-blue-500 text-blue-200',
+  success: 'bg-surface-raised border-l-4 border-success-500 text-success-100',
+  error:   'bg-surface-raised border-l-4 border-danger-500 text-danger-100',
+  warning: 'bg-surface-raised border-l-4 border-warning-500 text-warning-100',
+  info:    'bg-surface-raised border-l-4 border-cyan-500 text-cyan-100',
 }
 const ICONS: Record<string, string> = { success: '✓', error: '✗', warning: '⚠', info: 'ℹ' }
 
@@ -13,7 +13,7 @@ export default function ToastContainer() {
   return (
     <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 min-w-72 max-w-sm" aria-live="polite">
       {toasts.map((t) => (
-        <div key={t.id} className={`rounded-lg shadow-lg p-4 ${STYLES[t.type]}`} role="alert">
+        <div key={t.id} className={`rounded-lg shadow-lg p-4 backdrop-blur-sm ${STYLES[t.type]}`} role="alert">
           <div className="flex items-start gap-2">
             <span aria-hidden="true" className="font-bold text-sm">{ICONS[t.type]}</span>
             <div className="flex-1 min-w-0">
