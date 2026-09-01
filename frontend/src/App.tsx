@@ -8,6 +8,7 @@ import api from './api/client'
 import { authApi } from './api/auth'
 import { useAuthStore } from './stores/authStore'
 import AppShell from './components/layout/AppShell'
+import SovereignLogo from './components/ui/SovereignLogo'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import ChatPage from './pages/ChatPage'
@@ -83,7 +84,7 @@ function AppBootstrap({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-navy-950">
         <div className="text-center">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-cyan-500 to-cyan-700 flex items-center justify-center text-white font-bold text-lg mx-auto mb-3 shadow-glow-cyan">S</div>
+          <SovereignLogo size={40} animate={true} className="mx-auto mb-3" />
           <div className="animate-spin h-6 w-6 border-2 border-cyan-500 border-t-transparent rounded-full mx-auto" aria-label="Loading" />
         </div>
       </div>

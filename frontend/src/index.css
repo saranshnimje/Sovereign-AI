@@ -91,9 +91,93 @@
   border-radius: 0.5rem;
 }
 
+/* ── Sovereign Logo Animation ───────────────────────────────────── */
+@keyframes ring-draw {
+  0% {
+    stroke-dashoffset: 100;
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+@keyframes hexagon-pop {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  30% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  80% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+}
+
+@keyframes accent-pulse {
+  0%, 100% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  30% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.3);
+  }
+  70% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+}
+
+.sovereign-logo .ring-segment {
+  animation: ring-draw 1s ease-in-out infinite;
+  opacity: 0;
+}
+
+.sovereign-logo .ring-segment-0 { animation-delay: 0s; }
+.sovereign-logo .ring-segment-1 { animation-delay: 0.05s; }
+.sovereign-logo .ring-segment-2 { animation-delay: 0.1s; }
+.sovereign-logo .ring-segment-3 { animation-delay: 0.15s; }
+
+.sovereign-logo .hexagon {
+  transform-origin: 16px 16px;
+  animation: hexagon-pop 1s ease-in-out infinite;
+  animation-delay: 0.2s;
+  opacity: 0;
+}
+
+.sovereign-logo .accent-dot {
+  transform-origin: 26px 12px;
+  animation: accent-pulse 1s ease-in-out infinite;
+  animation-delay: 0.3s;
+  opacity: 0;
+}
+
 /* ── Reduce motion ─────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .animate-pulse, .animate-spin, .animate-pulse-cyan,
   .streaming-cursor::after { animation: none !important; }
   .skeleton { animation: none !important; }
+  .sovereign-logo .ring-segment,
+  .sovereign-logo .hexagon,
+  .sovereign-logo .accent-dot { animation: none !important; opacity: 1 !important; }
 }

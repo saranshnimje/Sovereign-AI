@@ -6,6 +6,7 @@ import { authApi } from '../../api/auth'
 import { systemApi, SystemStatus } from '../../api/system'
 import ToastContainer from '../ui/ToastContainer'
 import StatusPill from '../ui/StatusPill'
+import SovereignLogo from '../ui/SovereignLogo'
 
 const NAV_ITEMS = [
   { to: '/',          icon: HomeIcon,        label: 'Dashboard',      roles: ['viewer','analyst','admin'] },
@@ -143,9 +144,7 @@ export default function AppShell() {
       >
         {/* Logo */}
         <div className="flex items-center gap-3 px-4 py-4 border-b border-surface-border">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-cyan-700 flex items-center justify-center text-white font-bold text-sm flex-shrink-0 shadow-glow-cyan">
-            S
-          </div>
+          <SovereignLogo size={32} animate={true} className="flex-shrink-0" />
           {sidebarOpen && (
             <div>
               <span className="text-cyan-400 font-semibold text-sm">Sovereign AI</span>

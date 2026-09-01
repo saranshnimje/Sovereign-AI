@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { authApi } from '../api/auth'
 import { useAuthStore } from '../stores/authStore'
+import SovereignLogo from '../components/ui/SovereignLogo'
 
 export default function LoginPage() {
   const navigate = useNavigate()
@@ -40,8 +41,8 @@ export default function LoginPage() {
 
       <div className="w-full max-w-md relative">
         <div className="text-center mb-8">
-          <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-700 flex items-center justify-center text-white font-bold text-xl mx-auto mb-4 shadow-glow-cyan">
-            S
+          <div className="mx-auto mb-4">
+            <SovereignLogo size={56} animate={true} />
           </div>
           <h1 className="text-2xl font-bold text-white">Sovereign AI Workbench</h1>
           <p className="text-sm text-neutral-400 mt-1">Privacy-first on-premise AI platform</p>
