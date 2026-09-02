@@ -2,22 +2,20 @@ services:
   - type: web
     name: sovereign-ai-backend
     runtime: python
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /api/v1/system/health
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
     envVars:
       - key: SECRET_KEY
-        generateValue: true
+        value: change-this-to-a-real-secret-key-32-chars-minimum
       - key: ENVIRONMENT
         value: production
       - key: QDRANT_URL
-        value: https://placeholder-qdrant-url.qdrant.io
+        value: https://placeholder.qdrant.io
       - key: QDRANT_API_KEY
-        value: placeholder-qdrant-api-key
+        value: placeholder
       - key: FRONTEND_ORIGIN
-        value: https://placeholder-vercel-url.vercel.app
+        value: https://placeholder.vercel.app
       - key: OLLAMA_URL
         value: ""
       - key: DATA_DIR
@@ -30,11 +28,3 @@ services:
         value: ""
       - key: LOG_LEVEL
         value: INFO
-      - key: RATE_LIMIT_ENABLED
-        value: "true"
-      - key: RATE_LIMIT_AUTH_PER_MIN
-        value: "30"
-      - key: RATE_LIMIT_UPLOAD_PER_MIN
-        value: "30"
-      - key: RATE_LIMIT_AI_PER_MIN
-        value: "120"
