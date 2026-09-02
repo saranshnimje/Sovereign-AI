@@ -13,11 +13,11 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: QDRANT_URL
-        sync: false
+        value: https://placeholder-qdrant-url.qdrant.io
       - key: QDRANT_API_KEY
-        sync: false
+        value: placeholder-qdrant-api-key
       - key: FRONTEND_ORIGIN
-        sync: false
+        value: https://placeholder-vercel-url.vercel.app
       - key: OLLAMA_URL
         value: ""
       - key: DATA_DIR
