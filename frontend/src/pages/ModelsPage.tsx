@@ -5,6 +5,7 @@ import {
   ModelRecord, ProviderResponse, ProviderTestResult, ProviderUpdate,
 } from '../api/providers'
 import { systemApi, ModelInfo } from '../api/system'
+import { API_BASE } from '../api/client'
 import { useAuthStore } from '../stores/authStore'
 import { useUIStore } from '../stores/uiStore'
 
@@ -266,7 +267,7 @@ export default function ModelsPage() {
     if (!name) return
     setPulling(true); setPullLog([`Starting pull: ${name}`])
     try {
-      const resp = await fetch('/api/v1/models/pull', {
+      const resp = await fetch(`${API_BASE}/api/v1/models/pull`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${useAuthStore.getState().accessToken}` },
         body: JSON.stringify({ model_name: name }),
       })

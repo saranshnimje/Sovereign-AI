@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { parseServerDate, istDateParts } from '../utils/dates'
 import { chatApi, ConversationDetail, ConversationResponse, CitationSource } from '../api/chat'
 import { providersApi, prefsApi, ModelRecord, ProviderResponse } from '../api/providers'
+import { API_BASE } from '../api/client'
 import { useAuthStore } from '../stores/authStore'
 import { useUIStore } from '../stores/uiStore'
 import { useChatStore } from '../stores/chatStore'
@@ -210,8 +211,8 @@ export default function ChatPage() {
     prefsApi.set(model.providerId, model.modelName).catch(() => {})
 
     const endpoint = agentMode
-      ? `/api/v1/chat/conversations/${currentConvId}/agent`
-      : `/api/v1/chat/conversations/${currentConvId}/messages`
+      ? `${API_BASE}/api/v1/chat/conversations/${currentConvId}/agent`
+      : `${API_BASE}/api/v1/chat/conversations/${currentConvId}/messages`
 
     const body: Record<string, unknown> = {
       content: text, model_name: model.modelName, provider_id: model.providerId,

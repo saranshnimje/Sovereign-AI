@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: sovereign-ai-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/system/health
+    autoDeploy: true
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ENVIRONMENT
+        value: production
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: OLLAMA_URL
+        value: ""
+      - key: DATA_DIR
+        value: /app/data
+      - key: DEFAULT_CHAT_MODEL
+        value: gpt-4o-mini
+      - key: DEFAULT_EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: DEFAULT_VISION_MODEL
+        value: ""
+      - key: LOG_LEVEL
+        value: INFO
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: RATE_LIMIT_AUTH_PER_MIN
+        value: "30"
+      - key: RATE_LIMIT_UPLOAD_PER_MIN
+        value: "30"
+      - key: RATE_LIMIT_AI_PER_MIN
+        value: "120"
