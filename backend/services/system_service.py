@@ -34,7 +34,7 @@ async def get_system_status() -> SystemStatus:
         from database import AsyncSessionLocal
         from models.provider import LLMProvider
 
-        async with async_session_factory() as db:
+        async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(LLMProvider).where(LLMProvider.enabled == True)  # noqa: E712
             )
