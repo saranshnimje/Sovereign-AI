@@ -940,12 +940,20 @@ def build_provider(
     base_url: str | None,
     api_key: str | None,
     timeout: float = 600.0,
-    custom_headers: dict[str, str] | None = None,
+    custom_headers: dict[str, str] | str | None = None,
 ) -> BaseLLMProvider:
     """
     Factory: create the correct provider instance from stored config.
     Used by the dependency injection layer to build request-time clients.
     """
+    # Parse JSON string from DB if needed
+    if isinstance(custom_headers, str):
+        try:
+            import json as _json
+            parsed = _json.loads(custom_headers)
+            custom_headers = parsed if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            custom_headers = None
     from models.provider import (
         PROVIDER_OLLAMA, PROVIDER_OPENAI, PROVIDER_ANTHROPIC,
         PROVIDER_GEMINI, PROVIDER_OPENAI_COMPATIBLE,
