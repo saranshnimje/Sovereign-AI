@@ -30,10 +30,6 @@ RUN PWSH_VERSION="7.4.6" \
 # Create non-root user (UID 1000)
 RUN groupadd -r sovereign && useradd -r -g sovereign -u 1000 sovereign
 
-# Give the sovereign user permission to execute commands
-# (terminal tools need this to function as an autonomous agent)
-RUN usermod -aG sudo sovereign 2>/dev/null || true
-
 WORKDIR /app
 
 # Install Python dependencies first (layer cache)

@@ -6,6 +6,9 @@ Security notes:
 - stdout/stderr capped to prevent context flooding
 - Timeout enforced (default 30s, max 120s)
 - No shell injection — uses list-based command execution
+- Workspace restriction: working_dir must be within workspace (CRITICAL security)
+- Dangerous commands blocked: rm -rf /, format, shutdown, etc.
+- Path traversal: ..\ and ..\ patterns rejected
 """
 from __future__ import annotations
 
@@ -18,6 +21,54 @@ from pydantic import BaseModel, Field
 _MAX_OUTPUT = 10000
 _DEFAULT_TIMEOUT = 30
 _MAX_TIMEOUT = 120
+
+_DANGEROUS_COMMANDS = frozenset({
+    "rm -rf /", "rm -rf /*", "rmdir /s /q", "format", "format c:",
+    "shutdown", "reboot", "halt", "init 0", "init 6",
+    "del /s /q C:\\", "rd /s /q C:\\",
+    "mkfs", "dd if=", ":(){ :|:& };:",
+    "chmod -R 777 /", "chown -R root:root /",
+    "echo 1 > /proc/sys/kernel/core_pattern",
+    # PowerShell dangerous commands
+    "remove-item -recurse -force", "clear-content", "stop-computer",
+    "restart-computer", "remove-item -path c:\\*",
+})
+
+_DANGEROUS_PATTERNS = (
+    "..\\", "../", "..\\\\", "..//",
+    "/etc/passwd", "/etc/shadow", "/etc/sudoers",
+    "C:\\Windows\\System32",
+    "/proc/", "/sys/", "/dev/",
+)
+
+
+def _is_path_within_workspace(path: str, workspace: str) -> bool:
+    """Check that resolved path is within the workspace directory."""
+    try:
+        resolved = os.path.realpath(path)
+        workspace_real = os.path.realpath(workspace)
+        return resolved.startswith(workspace_real + os.sep) or resolved == workspace_real
+    except (ValueError, OSError):
+        return False
+
+
+def _contains_traversal(value: str) -> bool:
+    """Check for path traversal attempts in input."""
+    normalized = value.replace("\\", "/").lower()
+    for pat in _DANGEROUS_PATTERNS:
+        if pat.replace("\\", "/").lower() in normalized:
+            return True
+    return False
+
+
+def _is_dangerous_command(command: str) -> bool:
+    """Check for known dangerous command patterns."""
+    normalized = command.lower().strip()
+    for dangerous in _DANGEROUS_COMMANDS:
+        d = dangerous.lower()
+        if normalized.startswith(d) or d in normalized:
+            return True
+    return False
 
 
 class RunCommandInput(BaseModel):
@@ -99,9 +150,37 @@ def _trim(text: str) -> str:
 
 async def execute_command(validated_input: RunCommandInput, context: dict) -> dict:
     """Execute a shell command in a subprocess."""
+    workspace = context.get("workspace_path", os.getcwd())
     working_dir = _resolve_working_dir(validated_input.working_dir, context)
     timeout = min(validated_input.timeout, _MAX_TIMEOUT)
     command = validated_input.command.strip()
+
+    result = {
+        "stdout": "",
+        "stderr": "",
+        "exit_code": -1,
+        "timed_out": False,
+        "command": command,
+        "working_dir": working_dir,
+    }
+
+    # SECURITY: Block dangerous commands
+    if _is_dangerous_command(command):
+        result["stderr"] = "Security error: command is blocked (dangerous operation)"
+        return result
+
+    # SECURITY: Block path traversal in working_dir
+    if validated_input.working_dir and _contains_traversal(validated_input.working_dir):
+        result["stderr"] = "Security error: working_dir contains path traversal"
+        return result
+
+    # SECURITY: Working directory must be within workspace
+    if not _is_path_within_workspace(working_dir, workspace):
+        result["stderr"] = (
+            f"Security error: working_dir must be within workspace. "
+            f"Requested: {working_dir}, Workspace: {workspace}"
+        )
+        return result
 
     # Split command into args (safe, no shell=True)
     args = command.split()
@@ -114,15 +193,6 @@ async def execute_command(validated_input: RunCommandInput, context: dict) -> di
     else:
         # On Linux/Mac, use /bin/sh -c for shell built-ins
         args = ["/bin/sh", "-c", command]
-
-    result = {
-        "stdout": "",
-        "stderr": "",
-        "exit_code": -1,
-        "timed_out": False,
-        "command": command,
-        "working_dir": working_dir,
-    }
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -156,6 +226,7 @@ async def execute_command(validated_input: RunCommandInput, context: dict) -> di
 
 async def execute_powershell(validated_input: RunPowerShellInput, context: dict) -> dict:
     """Execute a PowerShell script."""
+    workspace = context.get("workspace_path", os.getcwd())
     working_dir = _resolve_working_dir(validated_input.working_dir, context)
     timeout = min(validated_input.timeout, _MAX_TIMEOUT)
     script = validated_input.script.strip()
@@ -168,6 +239,24 @@ async def execute_powershell(validated_input: RunPowerShellInput, context: dict)
         "command": script[:200] + ("..." if len(script) > 200 else ""),
         "working_dir": working_dir,
     }
+
+    # SECURITY: Block dangerous commands
+    if _is_dangerous_command(script):
+        result["stderr"] = "Security error: script is blocked (dangerous operation)"
+        return result
+
+    # SECURITY: Block path traversal in working_dir
+    if validated_input.working_dir and _contains_traversal(validated_input.working_dir):
+        result["stderr"] = "Security error: working_dir contains path traversal"
+        return result
+
+    # SECURITY: Working directory must be within workspace
+    if not _is_path_within_workspace(working_dir, workspace):
+        result["stderr"] = (
+            f"Security error: working_dir must be within workspace. "
+            f"Requested: {working_dir}, Workspace: {workspace}"
+        )
+        return result
 
     # Determine PowerShell executable
     if platform.system() == "Windows":

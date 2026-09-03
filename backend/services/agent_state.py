@@ -50,12 +50,12 @@ class AgentState(str, Enum):
 _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
     AgentState.IDLE: {AgentState.UNDERSTANDING, AgentState.FAILED, AgentState.CANCELLED},
     AgentState.UNDERSTANDING: {AgentState.PLANNING, AgentState.EXECUTING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED},
-    AgentState.PLANNING: {AgentState.EXECUTING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED},
+    AgentState.PLANNING: {AgentState.EXECUTING, AgentState.VERIFYING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED},
     AgentState.EXECUTING: {
         AgentState.OBSERVING, AgentState.WAITING_APPROVAL,
         AgentState.VERIFYING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED
     },
-    AgentState.OBSERVING: {AgentState.REASONING, AgentState.EXECUTING, AgentState.FAILED, AgentState.CANCELLED},
+    AgentState.OBSERVING: {AgentState.REASONING, AgentState.EXECUTING, AgentState.VERIFYING, AgentState.FAILED, AgentState.CANCELLED},
     AgentState.REASONING: {
         AgentState.EXECUTING, AgentState.VERIFYING,
         AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED

@@ -32,6 +32,13 @@ class AgentRun(Base, TimestampMixin):
     model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     max_iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
     todo_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    goal_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_step_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    parent_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_verification_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="agent_runs")
     tool_calls: Mapped[list["ToolCall"]] = relationship(
@@ -113,3 +120,22 @@ class ApprovalRequest(Base):
 
     def __repr__(self) -> str:
         return f"<ApprovalRequest id={self.id} status={self.status}>"
+
+
+class AgentEvent(Base):
+    __tablename__ = "agent_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<AgentEvent id={self.id} type={self.event_type}>"

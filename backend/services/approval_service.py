@@ -71,12 +71,13 @@ class ApprovalService:
         _approval_events[req.id] = evt
 
         # Mark agent run as awaiting_approval
-        run_result = await self.db.execute(
-            select(AgentRun).where(AgentRun.id == agent_run_id)
-        )
-        run = run_result.scalar_one_or_none()
-        if run:
-            run.status = "awaiting_approval"
+        if agent_run_id:
+            run_result = await self.db.execute(
+                select(AgentRun).where(AgentRun.id == agent_run_id)
+            )
+            run = run_result.scalar_one_or_none()
+            if run:
+                run.status = "awaiting_approval"
 
         await self.db.flush()
 

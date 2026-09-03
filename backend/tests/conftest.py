@@ -13,6 +13,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import database
 from database import Base, get_db
 from main import app
 
@@ -49,9 +50,16 @@ async def db():
 
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+    # Monkeypatch database.AsyncSessionLocal so that send_agent_message
+    # (and any other endpoint that creates its own session) uses the
+    # test's in-memory engine instead of the file-based one.
+    original_factory = database.AsyncSessionLocal
+    database.AsyncSessionLocal = session_factory
+
     async with session_factory() as session:
         yield session
 
+    database.AsyncSessionLocal = original_factory
     await engine.dispose()
 
 

@@ -5,7 +5,7 @@ Importing this package registers all models with SQLAlchemy's Base.metadata.
 from models.user import User, RefreshToken
 from models.conversation import Conversation, Message
 from models.knowledge_base import KnowledgeBase, Document
-from models.agent import AgentRun, ToolCall, ApprovalRequest
+from models.agent import AgentRun, ToolCall, ApprovalRequest, AgentEvent
 from models.audit import AuditLog
 from models.provider import LLMProvider
 from models.provider_model import ProviderModel
@@ -26,6 +26,7 @@ __all__ = [
     "AgentRun",
     "ToolCall",
     "ApprovalRequest",
+    "AgentEvent",
     "AuditLog",
     "LLMProvider",
     "ProviderModel",

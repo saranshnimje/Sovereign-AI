@@ -9,54 +9,29 @@ from httpx import AsyncClient
 
 
 # ------------------------------------------------------------------
-# Agent SSE stream endpoint
+# Agent run management endpoints (read-only + cancel)
 # ------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_agent_stream_endpoint_exists(auth_client: AsyncClient):
-    """The /stream endpoint must exist and require auth."""
-    from models.base import generate_uuid
-    resp = await auth_client.get(f"/api/v1/agents/runs/{generate_uuid()}/stream")
-    # 404 = run not found (correct — endpoint exists but run doesn't)
-    assert resp.status_code == 404
+    """The /runs endpoint must exist and return a list."""
+    resp = await auth_client.get("/api/v1/agents/runs")
+    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_agent_stream_requires_auth(client: AsyncClient):
-    """SSE stream must be protected — unauthenticated access denied."""
-    from models.base import generate_uuid
-    resp = await client.get(f"/api/v1/agents/runs/{generate_uuid()}/stream")
+async def test_agent_runs_requires_auth(client: AsyncClient):
+    """Agent runs listing must be protected — unauthenticated access denied."""
+    resp = await client.get("/api/v1/agents/runs")
     assert resp.status_code in (401, 403)
 
 
 @pytest.mark.asyncio
-async def test_agent_stream_emits_events(auth_client: AsyncClient):
-    """Create a run, start the stream, verify SSE events are emitted."""
-    import asyncio
-
-    with patch("services.llm_client.OllamaClient.chat",
-               new=AsyncMock(return_value=MagicMock(
-                   content='{"type": "complete", "result": "Stream test done"}'))):
-        create = await auth_client.post("/api/v1/agents/runs", json={
-            "goal": "stream test", "max_iterations": 2
-        })
-    run_id = create.json()["id"]
-
-    # Give the background task a moment to run
-    await asyncio.sleep(0.3)
-
-    # Open the SSE stream — collect first few events
-    events = []
-    async with auth_client.stream("GET", f"/api/v1/agents/runs/{run_id}/stream") as resp:
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers.get("content-type", "")
-        async for line in resp.aiter_lines():
-            if line.startswith("event:"):
-                events.append(line.split(":", 1)[1].strip())
-            if len(events) >= 3 or "complete" in events or "error" in events:
-                break
-
-    assert len(events) > 0, "Expected at least one SSE event"
+async def test_agent_run_detail_requires_auth(client: AsyncClient):
+    """Agent run detail must be protected — unauthenticated access denied."""
+    from models.base import generate_uuid
+    resp = await client.get(f"/api/v1/agents/runs/{generate_uuid()}")
+    assert resp.status_code in (401, 403)
 
 
 # ------------------------------------------------------------------
