@@ -78,12 +78,12 @@ async def get_system_status() -> SystemStatus:
                 if healthy_count > 0:
                     services["llm"] = ServiceStatus(
                         status="up",
-                        detail=f"{healthy_count}/{total} providers online",
+                        detail="Online",
                     )
                 else:
                     services["llm"] = ServiceStatus(
                         status="down",
-                        detail=f"0/{total} providers online",
+                        detail="Offline",
                     )
 
     except Exception as exc:
