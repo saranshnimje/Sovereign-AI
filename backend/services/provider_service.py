@@ -275,6 +275,7 @@ class ProviderService:
             try:
                 raw_models = await client.list_models()
                 models_found = len(raw_models)
+                logger.info("test_connection provider=%s models_found=%d first_model=%s", provider_id, models_found, first_model)
                 for m in raw_models or []:
                     if isinstance(m, dict):
                         first_model = m.get("id") or m.get("name") or m.get("model")
@@ -282,8 +283,10 @@ class ProviderService:
                             break
             except ModelUnavailableError as exc:
                 discovery_error = _friendly_error(_sanitize(str(exc), p.api_key))
-            except Exception:
+                logger.warning("test_connection provider=%s ModelUnavailableError: %s", provider_id, discovery_error)
+            except Exception as exc:
                 discovery_error = "Connected, but model listing is not supported by this endpoint"
+                logger.warning("test_connection provider=%s list_models exception: %s", provider_id, exc)
 
             # Deep auth check: public /models endpoints on cloud gateways make a
             # bare health check meaningless when an API key is stored. A 1-token

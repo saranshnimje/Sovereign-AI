@@ -243,6 +243,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         if self._api_key:
             h["Authorization"] = f"Bearer {self._api_key}"
         h.update(self._custom_headers)
+        logger.debug("OpenAICompatible _build_headers: keys=%s custom=%s", list(h.keys()), list(self._custom_headers.keys()))
         return h
 
     def _api_root(self) -> str:
