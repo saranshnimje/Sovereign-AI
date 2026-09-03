@@ -290,7 +290,10 @@ export default function ProvidersPage() {
     try {
       await providersApi.refreshModels(p.id)
       await load()
-    } catch { addToast({ type: 'warning' as any, title: 'Saved — discovery failed' } as any) }
+    } catch (err: any) {
+      const msg = err?.response?.data?.detail || err?.response?.data?.error?.message || 'Discovery failed — models not saved'
+      addToast({ type: 'warning' as any, title: msg } as any)
+    }
   }
   const handleUpdate = async (id: string, data: any) => {
     const p = await providersApi.update(id, data)
