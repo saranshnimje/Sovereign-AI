@@ -625,7 +625,7 @@ class AgentRuntime:
             logger.warning("Reasoner raw output (unparseable): %s", text[:500])
             # Fallback: if no tools have been used and plan has no tool steps,
             # treat simple greetings as COMPLETE
-            has_tool_steps = any(s.tool for s in agent.plan if s.status == "pending") if agent.plan else False
+            has_tool_steps = any(s.tool_name for s in agent.plan if s.status == "pending") if agent.plan else False
             if not has_tool_steps and not observations:
                 return AgentDecision(
                     decision="VERIFY",
@@ -638,7 +638,7 @@ class AgentRuntime:
         except Exception:
             logger.warning("Reasoner invalid schema: %s | raw: %s", data, text[:300])
             # Fallback: if plan is done or no tools needed, verify
-            pending_tools = [s for s in agent.plan if s.status == "pending" and s.tool] if agent.plan else []
+            pending_tools = [s for s in agent.plan if s.status == "pending" and s.tool_name] if agent.plan else []
             if not pending_tools:
                 return AgentDecision(
                     decision="VERIFY",
