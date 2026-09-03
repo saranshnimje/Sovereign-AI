@@ -196,7 +196,7 @@ export default function DashboardPage() {
                   <div key={name} className="flex items-center justify-between p-2.5 bg-surface-overlay rounded-lg border border-surface-border">
                     <div className="flex items-center gap-2.5">
                       <span className={`w-2.5 h-2.5 rounded-full ${svc.status === 'up' ? 'bg-success-500' : 'bg-danger-500'}`} />
-                      <span className="text-sm text-neutral-200 capitalize">{name}</span>
+                      <span className="text-sm text-neutral-200">{name === 'llm' ? 'LLM' : name.charAt(0).toUpperCase() + name.slice(1)}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       {svc.latency_ms != null && <span className="text-[10px] text-neutral-500">{svc.latency_ms}ms</span>}
