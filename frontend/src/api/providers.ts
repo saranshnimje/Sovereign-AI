@@ -39,6 +39,7 @@ export interface ProviderPreset {
   api_key_url: string | null
   supports_discovery: boolean
   adapter: string
+  default_custom_headers?: Record<string, string>
 }
 
 /** A persisted discovered model belonging to a provider */
@@ -69,6 +70,7 @@ export interface ProviderCreate {
   supports_streaming?: boolean
   supports_embeddings?: boolean
   description?: string
+  custom_headers?: Record<string, string>
 }
 
 export interface ProviderUpdate {
@@ -81,6 +83,7 @@ export interface ProviderUpdate {
   supports_streaming?: boolean
   supports_embeddings?: boolean
   description?: string
+  custom_headers?: Record<string, string> | null
 }
 
 export interface ProviderTestResult {

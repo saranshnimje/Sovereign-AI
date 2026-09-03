@@ -308,6 +308,7 @@ PROVIDER_PRESETS: list[dict] = [
         "api_key_url": "https://openrouter.ai/settings/keys",
         "supports_discovery": True,
         "adapter": "OpenAICompatibleProvider",
+        "default_custom_headers": {"HTTP-Referer": "https://sovereign-ai.app", "X-Title": "Sovereign AI Workbench"},
     },
     {
         "id": PROVIDER_OPENCODE_ZEN,

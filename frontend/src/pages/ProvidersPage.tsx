@@ -77,6 +77,9 @@ function ProviderForm({ initial, preset, onSave, onClose }: {
   const [error, setError] = useState('')
   const [testingConn, setTestingConn] = useState(false)
   const [connResult, setConnResult] = useState<{ ok: boolean; message: string } | null>(null)
+  const [customHeaders, setCustomHeaders] = useState<string>(
+    initial ? '' : (preset?.default_custom_headers ? JSON.stringify(preset.default_custom_headers, null, 2) : '')
+  )
 
   const requiresApiKey = preset?.requires_api_key ?? ['openai', 'anthropic', 'gemini'].includes(ptype)
   const baseUrlRequired = preset ? preset.id === 'openai_compatible' : true
@@ -93,6 +96,9 @@ function ProviderForm({ initial, preset, onSave, onClose }: {
         base_url: baseUrl || undefined, supports_streaming: true, supports_embeddings: supportsEmbed,
       }
       if (apiKey) payload.api_key = apiKey
+      if (customHeaders.trim()) {
+        try { payload.custom_headers = JSON.parse(customHeaders) } catch { setConnResult({ ok: false, message: 'Custom headers must be valid JSON' }); setTestingConn(false); return }
+      }
       const created = await providersApi.create(payload)
       let result: ProviderTestResult
       try { result = await providersApi.test(created.id) } finally { await providersApi.delete(created.id).catch(() => undefined) }
@@ -111,6 +117,9 @@ function ProviderForm({ initial, preset, onSave, onClose }: {
       if (!isEdit) payload.provider_type = ptype
       if (baseUrl) payload.base_url = baseUrl
       if ((requiresApiKey || replaceKey) && apiKey) payload.api_key = apiKey
+      if (customHeaders.trim()) {
+        try { payload.custom_headers = JSON.parse(customHeaders) } catch { setError('Custom headers must be valid JSON'); setLoading(false); return }
+      }
       await onSave(payload as ProviderCreate | ProviderUpdate); onClose()
     } catch (err: any) { setError(err?.response?.data?.error?.message || 'Failed to save') }
     finally { setLoading(false) }
@@ -186,6 +195,17 @@ function ProviderForm({ initial, preset, onSave, onClose }: {
               <label className={labelCls}>Description (optional)</label>
               <input type="text" value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Company internal AI gateway" className={inputCls} />
             </div>
+            <details className="group">
+              <summary className="cursor-pointer text-xs font-medium text-neutral-400 hover:text-neutral-300 select-none">Custom Headers (advanced)</summary>
+              <div className="mt-2">
+                <label className={labelCls}>JSON Headers</label>
+                <textarea value={customHeaders} onChange={e => setCustomHeaders(e.target.value)}
+                  placeholder='{"HTTP-Referer": "https://myapp.com", "X-Title": "My App"}'
+                  rows={3}
+                  className={inputCls + ' font-mono text-xs'} />
+                <p className="text-xs text-neutral-500 mt-1">Extra HTTP headers sent with every request. Valid JSON object.</p>
+              </div>
+            </details>
             <div className="flex items-center gap-4 pt-1">
               <label className="flex items-center gap-2 cursor-pointer text-sm text-neutral-300">
                 <input type="checkbox" checked={supportsEmbed} onChange={e => setSupportsEmbed(e.target.checked)} className="h-4 w-4 rounded border-surface-border text-cyan-500 focus:ring-cyan-500" />

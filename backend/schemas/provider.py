@@ -119,6 +119,7 @@ class ProviderPreset(BaseModel):
     api_key_url: str | None = None
     supports_discovery: bool = True
     adapter: str
+    default_custom_headers: dict[str, str] | None = None
 
 
 class ModelRecord(BaseModel):
