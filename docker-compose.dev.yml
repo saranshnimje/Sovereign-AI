@@ -34,6 +34,12 @@ services:
       - DEFAULT_VISION_MODEL=${DEFAULT_VISION_MODEL:-llava:7b}
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production-abc123}
       - DOCKER_HOST=tcp://dockerproxy:2375
+      # Agent configuration (relaxed for dev)
+      - AGENT_MAX_ITERATIONS=30
+      - AGENT_MAX_TOOL_CALLS=20
+      - AGENT_MAX_EXECUTION_TIME_S=300
+      - TERMINAL_ENABLED=true
+      - TERMINAL_TIMEOUT_S=30
     volumes:
       - ./backend:/app
       - backend_data:/app/data

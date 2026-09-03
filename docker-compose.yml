@@ -56,6 +56,17 @@ services:
       - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL:-qwen3:14b}
       - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}
       - DEFAULT_VISION_MODEL=${DEFAULT_VISION_MODEL:-llava:7b}
+      # Agent configuration
+      - AGENT_MAX_ITERATIONS=${AGENT_MAX_ITERATIONS:-50}
+      - AGENT_MAX_TOOL_CALLS=${AGENT_MAX_TOOL_CALLS:-30}
+      - AGENT_MAX_EXECUTION_TIME_S=${AGENT_MAX_EXECUTION_TIME_S:-600}
+      - AGENT_MAX_SUBAGENT_DEPTH=${AGENT_MAX_SUBAGENT_DEPTH:-10}
+      - AGENT_MAX_SUBAGENT_CONCURRENT=${AGENT_MAX_SUBAGENT_CONCURRENT:-5}
+      - AGENT_APPROVAL_TIMEOUT_MIN=${AGENT_APPROVAL_TIMEOUT_MIN:-5}
+      # Terminal tools
+      - TERMINAL_ENABLED=${TERMINAL_ENABLED:-true}
+      - TERMINAL_TIMEOUT_S=${TERMINAL_TIMEOUT_S:-30}
+      - TERMINAL_MAX_TIMEOUT_S=${TERMINAL_MAX_TIMEOUT_S:-120}
       # Sandbox reaches Docker through the LEAST-PRIVILEGE PROXY below.
       # The backend container never sees the host socket directly.
       - DOCKER_HOST=tcp://dockerproxy:2375
@@ -79,7 +90,7 @@ services:
   # containers, swarm, etc.) are denied by default.
   # ------------------------------------------------------------------
   dockerproxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
+    image: tecnativa/docker-socket-proxy:v0.5.0
     container_name: sovereign-dockerproxy
     environment:
       - CONTAINERS=1     # /containers/*  (create/start/wait/logs/remove)
@@ -114,7 +125,7 @@ services:
   # Qdrant — local vector database
   # ------------------------------------------------------------------
   qdrant:
-    image: qdrant/qdrant:v1.9.2
+    image: qdrant/qdrant:v1.19
     ports:
       - "6333:6333"
       - "6334:6334"

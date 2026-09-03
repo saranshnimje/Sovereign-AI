@@ -28,3 +28,11 @@ services:
         value: ""
       - key: LOG_LEVEL
         value: INFO
+      - key: AGENT_MAX_ITERATIONS
+        value: "50"
+      - key: AGENT_MAX_TOOL_CALLS
+        value: "30"
+      - key: AGENT_MAX_EXECUTION_TIME_S
+        value: "600"
+      - key: TERMINAL_ENABLED
+        value: "true"

@@ -192,6 +192,8 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
     from tools import web, meta_tools
     from tools import system_status, sensor_tool, vision_tool, incident_tool
     from tools import org_search
+    from tools import terminal
+    from tools import subagent_tool
 
     reg.register(ToolDefinition(
         name="file_read",
@@ -516,4 +518,116 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
         category="domain",
         version="1.0.0",
         permissions=[],
+    ))
+
+    # ---- Terminal tools ----
+
+    reg.register(ToolDefinition(
+        name="run_command",
+        description=(
+            "Execute a shell command (cmd/bash) on the host system. "
+            "Returns stdout, stderr, and exit code. "
+            "Timeout enforced (default 30s, max 120s). "
+            "WARNING: This tool requires administrator approval."
+        ),
+        input_schema=terminal.RunCommandInput,
+        output_schema=terminal.RunCommandOutput,
+        risk_level=RISK_HIGH,
+        required_role=ROLE_ADMIN,
+        requires_sandbox=False,
+        handler=terminal.execute_command,
+        tags=["terminal", "shell", "command"],
+        category="terminal",
+        version="1.0.0",
+        permissions=["terminal_execution"],
+    ))
+
+    reg.register(ToolDefinition(
+        name="run_powershell",
+        description=(
+            "Execute a PowerShell script or command on the host system. "
+            "Returns stdout, stderr, and exit code. "
+            "Useful for Windows system administration, file operations, and automation. "
+            "Timeout enforced (default 30s, max 120s). "
+            "WARNING: This tool requires administrator approval."
+        ),
+        input_schema=terminal.RunPowerShellInput,
+        output_schema=terminal.RunPowerShellOutput,
+        risk_level=RISK_HIGH,
+        required_role=ROLE_ADMIN,
+        requires_sandbox=False,
+        handler=terminal.execute_powershell,
+        tags=["terminal", "powershell", "command"],
+        category="terminal",
+        version="1.0.0",
+        permissions=["terminal_execution"],
+    ))
+
+    # ---- Sub-agent tools ----
+
+    reg.register(ToolDefinition(
+        name="spawn_subagent",
+        description=(
+            "Spawn a specialized sub-agent to work on an independent task in parallel. "
+            "Sub-agents run with their own context and tool set. "
+            "Agent types: researcher, coder, tester, reviewer, security, data_analyst."
+        ),
+        input_schema=subagent_tool.SpawnSubagentInput,
+        output_schema=subagent_tool.SpawnSubagentOutput,
+        risk_level=RISK_MEDIUM,
+        required_role=ROLE_ANALYST,
+        requires_sandbox=False,
+        handler=subagent_tool.execute_spawn,
+        tags=["agent", "subagent"],
+        category="agent",
+        version="1.0.0",
+        permissions=["subagent_spawn"],
+    ))
+
+    reg.register(ToolDefinition(
+        name="get_subagent_result",
+        description=(
+            "Wait for a sub-agent to complete and retrieve its result. "
+            "Returns findings, artifacts, and summary."
+        ),
+        input_schema=subagent_tool.GetSubagentResultInput,
+        output_schema=subagent_tool.GetSubagentResultOutput,
+        risk_level=RISK_LOW,
+        required_role=ROLE_ANALYST,
+        requires_sandbox=False,
+        handler=subagent_tool.execute_get_result,
+        tags=["agent", "subagent"],
+        category="agent",
+        version="1.0.0",
+        permissions=["subagent_read"],
+    ))
+
+    reg.register(ToolDefinition(
+        name="list_subagents",
+        description="List all active and completed sub-agents for the current session.",
+        input_schema=subagent_tool.ListSubagentsInput,
+        output_schema=subagent_tool.ListSubagentsOutput,
+        risk_level=RISK_LOW,
+        required_role=ROLE_VIEWER,
+        requires_sandbox=False,
+        handler=subagent_tool.execute_list,
+        tags=["agent", "subagent"],
+        category="agent",
+        version="1.0.0",
+        permissions=["subagent_read"],
+    ))
+
+    reg.register(ToolDefinition(
+        name="cancel_subagent",
+        description="Cancel a running sub-agent.",
+        input_schema=subagent_tool.CancelSubagentInput,
+        output_schema=subagent_tool.CancelSubagentOutput,
+        risk_level=RISK_LOW,
+        required_role=ROLE_ANALYST,
+        requires_sandbox=False,
+        handler=subagent_tool.execute_cancel,
+        tags=["agent", "subagent"],
+        category="agent",
+        version="1.0.0",
+        permissions=["subagent_cancel"],
     ))

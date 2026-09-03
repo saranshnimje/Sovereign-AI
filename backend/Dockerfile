@@ -3,7 +3,7 @@
 
 FROM python:3.11-slim AS base
 
-# Install system dependencies
+# Install system dependencies including shell tools for terminal execution
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libsm6 \
@@ -11,10 +11,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libgomp1 \
     curl \
+    wget \
+    bash \
+    procps \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install PowerShell Core (pwsh) via direct binary download
+# This avoids Microsoft package signing key issues on newer Debian
+RUN PWSH_VERSION="7.4.6" \
+    && wget -q "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" -O /tmp/pwsh.tar.gz \
+    && mkdir -p /opt/microsoft/powershell \
+    && tar -xzf /tmp/pwsh.tar.gz -C /opt/microsoft/powershell \
+    && rm /tmp/pwsh.tar.gz \
+    && ln -s /opt/microsoft/powershell/pwsh /usr/local/bin/pwsh \
+    && chmod +x /opt/microsoft/powershell/pwsh
 
 # Create non-root user (UID 1000)
 RUN groupadd -r sovereign && useradd -r -g sovereign -u 1000 sovereign
+
+# Give the sovereign user permission to execute commands
+# (terminal tools need this to function as an autonomous agent)
+RUN usermod -aG sudo sovereign 2>/dev/null || true
 
 WORKDIR /app
 

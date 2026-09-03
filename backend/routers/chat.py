@@ -320,6 +320,7 @@ async def send_agent_message(
     body = data.model_dump()
     tool_mode = (body.get("tool_mode") or "auto")
     manual_tools = body.get("tools") or []
+    agent_mode = body.get("agent_mode") or "agent"  # "plan" | "agent"
 
     # --- create self-managed session (outlives FastAPI dependency lifecycle) ---
     from database import AsyncSessionLocal
@@ -403,12 +404,16 @@ async def send_agent_message(
         # Emit initial state
         yield _sse("agent_state", agent.to_dict())
 
-        # Persist user message
+        # Persist user message immediately so it survives LLM failures
         user_msg = _Msg(conversation_id=conv_id, role="user",
                         content=data.content,
                         metadata_json=_json.dumps({"local": True, "agent": True}))
         session.add(user_msg)
         await session.flush()
+        try:
+            await session.commit()
+        except Exception:
+            logger.warning("Failed to commit user message (non-fatal)", exc_info=True)
 
         # --- Build system prompt ---
         if tool_mode == "none" or not tool_names:
@@ -418,30 +423,46 @@ async def send_agent_message(
             )
         else:
             system_prompt = (
-                "You are Sovereign AI Workbench's AI assistant with access to tools.\n\n"
+                "You are Sovereign AI Workbench's autonomous AI agent.\n\n"
+                "AVAILABLE ACTIONS (respond with ONLY one JSON object):\n\n"
+                "1. Call a tool:\n"
+                '{{"tool_call": {{"tool": "TOOL_NAME", "input": {{...}}, "reasoning": "why"}}}}\n\n'
+                "2. Mark task complete:\n"
+                '{{"complete": {{"result": "final answer or summary"}}}}\n\n'
+                "3. Replan (when current approach isn't working):\n"
+                '{{"replan": {{"reason": "why", "new_steps": ["step1", "step2"]}}}}\n\n'
+                "4. Update your todo list:\n"
+                '{{"update_todo": {{"action": "add|complete|fail|retry", "task_id": N, "description": "..."}}}}\n\n'
+                "5. Spawn a sub-agent for independent work:\n"
+                '{{"spawn_subagent": {{"task": "description", "agent_type": "researcher|coder|tester|reviewer"}}}}\n\n'
                 "Available tools:\n"
                 + tool_descriptions + "\n\n"
-                "HOW TO DECIDE:\n"
-                "- If the user asks something you already know with certainty -> answer directly\n"
-                "- If the user asks about current/recent events, news, dates, people in office, "
-                "prices, weather, scores -> use web_search\n"
-                "- If the user asks about an organization, company, employee, department, "
-                "or any company-related information -> use search_org_data first, "
-                "then use web_search for the latest/recent data\n"
-                "- If the user asks to search documents/knowledge base -> use search_kb\n"
-                "- If the user asks to calculate something -> use calculator\n"
-                "- If the user gives you a URL to read -> use web_fetch\n"
-                "- If unsure, use the most relevant tool to get accurate information\n\n"
-                "COMBINE TOOLS: For organization questions, first search internal data with "
-                "search_org_data, then use web_search for the latest public information. "
-                "Combine both sources for a complete answer.\n\n"
-                "To use a tool, respond with ONLY this JSON:\n"
-                '{"tool_call": {"tool": "TOOL_NAME", "input": {...}, "reasoning": "why"}}\n\n'
-                "When you have enough info, just answer normally. Be helpful and accurate.\n"
+                "TODO LIST:\n"
+                "{todo_summary}\n\n"
+                "HOW TO WORK AUTONOMOUSLY:\n"
+                "1. Understand the goal completely\n"
+                "2. Create a todo list (use update_todo to add tasks)\n"
+                "3. Work through tasks one by one\n"
+                "4. After EACH tool call, verify the result succeeded\n"
+                "5. If a tool fails, do NOT repeat it — try a different approach\n"
+                "6. For independent tasks, use spawn_subagent\n"
+                "7. When all tasks are done, verify the overall result\n"
+                "8. Only say 'complete' when you've verified success\n\n"
+                "VERIFICATION RULES:\n"
+                "- If run_command exit_code != 0 → it FAILED, fix the command\n"
+                "- If run_powershell exit_code != 0 → it FAILED, fix the script\n"
+                "- If file_write returns no path → it FAILED\n"
+                "- Never assume a tool succeeded — check the result\n\n"
+                "Maximum iterations remaining: {remaining}\n"
+                "Previous steps: {summary}\n"
             )
 
         messages: list[_ChatMessage] = []
-        messages.append(_ChatMessage(role="system", content=system_prompt))
+        messages.append(_ChatMessage(role="system", content=system_prompt.format(
+            todo_summary="No tasks yet — create your todo list with update_todo.",
+            remaining=MAX_ITERATIONS,
+            summary="None",
+        )))
         messages.append(_ChatMessage(role="user", content=data.content))
 
         final_content = ""
@@ -481,7 +502,8 @@ async def send_agent_message(
                     _model = data.model_name or conv.model_name
                     logger.info("Agent planning LLM call: model=%s provider=%s messages=%d", _model, model_label, len(messages))
                     try:
-                        resp = await asyncio.wait_for(
+                        resp = None
+                        async for _marker, _val in _run_with_heartbeat(
                             llm.chat(
                                 model=_model,
                                 messages=messages,
@@ -490,7 +512,14 @@ async def send_agent_message(
                                 max_tokens=1024,
                             ),
                             timeout=120.0,
-                        )
+                        ):
+                            if _marker == "tick":
+                                yield _sse("agent_state", {
+                                    **agent.to_dict(),
+                                    "thinking": True,
+                                })
+                            else:
+                                resp = _val
                         logger.info("Agent planning LLM response: content_len=%d", len(resp.content) if hasattr(resp, "content") else 0)
                     except asyncio.TimeoutError:
                         agent.fail("LLM timed out (120s) during planning")
@@ -565,7 +594,8 @@ async def send_agent_message(
                 try:
                     _model = data.model_name or conv.model_name
                     logger.info("Agent main loop LLM call: model=%s provider=%s iteration=%d messages=%d", _model, model_label, _iteration, len(messages))
-                    resp = await asyncio.wait_for(
+                    llm_text = None
+                    async for _marker, _val in _run_with_heartbeat(
                         llm.chat(
                             model=_model,
                             messages=messages,
@@ -574,8 +604,14 @@ async def send_agent_message(
                             max_tokens=2048,
                         ),
                         timeout=120.0,
-                    )
-                    llm_text = resp.content if hasattr(resp, "content") else str(resp)
+                    ):
+                        if _marker == "tick":
+                            yield _sse("agent_state", {
+                                **agent.to_dict(),
+                                "thinking": True,
+                            })
+                        else:
+                            llm_text = _val.content if hasattr(_val, "content") else str(_val)
                     logger.info("Agent main loop LLM response: len=%d", len(llm_text))
                 except asyncio.TimeoutError:
                     agent.fail("LLM timed out (120s)")
@@ -593,12 +629,114 @@ async def send_agent_message(
                     yield _sse("error", {"message": f"LLM error: {str(exc)[:200]}"})
                     return
 
-                # Check if LLM wants to call a tool
+                # Parse all possible LLM actions
                 tool_call = _parse_tool_call(llm_text)
                 plan_data = _parse_plan(llm_text)
                 verification_data = _parse_verification(llm_text)
+                complete_data = _parse_complete(llm_text)
+                replan_data = _parse_replan(llm_text)
+                update_todo_data = _parse_update_todo(llm_text)
+                spawn_subagent_data = _parse_spawn_subagent(llm_text)
 
-                # No tool call → final answer
+                # Handle update_todo action
+                if update_todo_data and tool_call is None:
+                    action = update_todo_data.get("action", "add")
+                    task_id = update_todo_data.get("task_id")
+                    desc = update_todo_data.get("description", "")
+                    if action == "add" and desc:
+                        task = agent.todo.add_task(desc)
+                        yield _sse("todo_updated", agent.todo.to_dict())
+                        yield _sse("todo_task_added", {
+                            "task_id": task.id, "description": desc, "status": "pending"
+                        })
+                    elif action == "complete" and task_id:
+                        agent.todo.complete_task(task_id)
+                        yield _sse("todo_updated", agent.todo.to_dict())
+                    elif action == "fail" and task_id:
+                        agent.todo.fail_task(task_id, update_todo_data.get("error", ""))
+                        yield _sse("todo_updated", agent.todo.to_dict())
+                    elif action == "retry" and task_id:
+                        agent.todo.retry_task(task_id)
+                        yield _sse("todo_updated", agent.todo.to_dict())
+
+                    # Feed confirmation back to LLM
+                    messages.append(_ChatMessage(role="user", content=(
+                        f"Todo updated: {action}. Current todo:\n"
+                        + _json.dumps(agent.todo.to_dict(), indent=1)
+                        + "\nContinue working on your tasks."
+                    )))
+                    continue
+
+                # Handle replan action
+                if replan_data and tool_call is None:
+                    reason = replan_data.get("reason", "")
+                    new_steps = replan_data.get("new_steps", [])
+                    yield _sse("recovery_started", {
+                        "reason": reason,
+                        "strategy": "replan",
+                    })
+                    # Reset failed tasks, add new steps
+                    for t in agent.todo.tasks:
+                        if t.status == "failed":
+                            t.status = "pending"
+                            t.error = None
+                    for step_desc in new_steps:
+                        agent.todo.add_task(step_desc)
+                    yield _sse("todo_updated", agent.todo.to_dict())
+                    yield _sse("recovery_completed", {"strategy": "replan", "success": True})
+                    messages.append(_ChatMessage(role="user", content=(
+                        f"Replanned: {reason}. Updated todo:\n"
+                        + _json.dumps(agent.todo.to_dict(), indent=1)
+                        + "\nContinue with the next task."
+                    )))
+                    continue
+
+                # Handle complete action
+                if complete_data and tool_call is None:
+                    result_text = complete_data.get("result", "")
+                    # Run final verification before accepting completion
+                    tools_used = [a["tool"] for a in agent.activity]
+                    failed_tools = [a["tool"] for a in agent.activity if a["status"] == "error"]
+                    pending_tasks = agent.todo.get_pending_count()
+
+                    # If there are still pending tasks, don't allow completion
+                    if pending_tasks > 0:
+                        messages.append(_ChatMessage(role="user", content=(
+                            f"You have {pending_tasks} unfinished tasks in your todo list. "
+                            f"Complete all tasks before finishing. Continue working."
+                        )))
+                        continue
+
+                    # If tools failed, ask for recovery
+                    if failed_tools:
+                        messages.append(_ChatMessage(role="user", content=(
+                            f"Some tools failed: {', '.join(failed_tools)}. "
+                            f"Try to recover or provide a partial result with caveats."
+                        )))
+                        continue
+
+                    final_content = result_text
+                    break
+
+                # Handle spawn_subagent action
+                if spawn_subagent_data and tool_call is None:
+                    sub_task = spawn_subagent_data.get("task", "")
+                    agent_type = spawn_subagent_data.get("agent_type", "researcher")
+                    yield _sse("subagent_spawned", {
+                        "session_id": f"sub-{_uuid.uuid4().hex[:8]}",
+                        "agent_type": agent_type,
+                        "task": sub_task[:200],
+                    })
+                    # For now, feed the sub-agent result as a simulated completion
+                    # (Full sub-agent system in Phase 3)
+                    messages.append(_ChatMessage(role="user", content=(
+                        f"Sub-agent '{agent_type}' received task: {sub_task}\n"
+                        f"(Sub-agent execution simulated — full multi-agent coming soon)\n"
+                        f"Continue with your main tasks."
+                    )))
+                    continue
+
+                # No tool call and no special action → final answer
                 if tool_call is None:
                     # Check for verification response
                     if verification_data:
@@ -621,25 +759,45 @@ async def send_agent_message(
                         })
 
                         if vr.task_completed:
-                            # Use the LLM text as final answer
                             final_content = llm_text
                             break
                         else:
-                            # Verification failed — ask LLM to fix
                             messages.append(_ChatMessage(role="user", content=(
-                                "Verification failed. The following claims are unsupported or evidence is missing:\n"
+                                "Verification failed. Issues:\n"
                                 + "\n".join(vr.unsupported_claims + vr.missing_evidence)
-                                + "\nPlease address these issues and provide a corrected answer."
+                                + "\nFix these issues and try again."
                             )))
                             continue
 
-                    # Normal final answer
+                    # Normal final answer — but verify if tools were used
+                    if agent.activity:
+                        yield _sse("verification_started", {"type": "final"})
+                        all_ok = all(a["status"] != "error" for a in agent.activity)
+                        yield _sse("verification_passed" if all_ok else "verification_failed", {
+                            "type": "final",
+                            "tools_ok": all_ok,
+                        })
                     final_content = llm_text
                     break
 
                 # If tool_mode=none, skip all tool execution
                 if tool_mode == "none":
                     final_content = llm_text
+                    break
+
+                # === PLAN MODE: skip tool execution, only plan ===
+                if agent_mode == "plan":
+                    # In plan mode, just return the plan without executing
+                    final_content = (
+                        f"## Plan\n\n"
+                        f"**Goal:** {data.content}\n\n"
+                        f"**Tasks:**\n"
+                        + "\n".join(
+                            f"- [ ] {t.description}"
+                            for t in agent.todo.tasks
+                        )
+                        + f"\n\n*Switch to Agent mode to execute this plan.*"
+                    )
                     break
 
                 # === EXECUTE TOOL CALL ===
@@ -785,17 +943,57 @@ async def send_agent_message(
                         "duration_ms": duration_ms,
                     })
 
+                    # === AUTONOMOUS VERIFICATION ===
+                    passed, reason = _verify_tool_result(tool_name, result)
+                    yield _sse("verification_started", {"type": "tool_result", "tool": tool_name})
+
+                    if not passed:
+                        # Verification failed — self-correction loop
+                        yield _sse("verification_failed", {
+                            "type": "tool_result",
+                            "tool": tool_name,
+                            "reason": reason,
+                        })
+                        agent.todo.fail_task(
+                            agent.todo.get_current().id if agent.todo.get_current() else 0,
+                            reason,
+                        )
+                        yield _sse("todo_updated", agent.todo.to_dict())
+
+                        # Feed failure back to LLM for recovery
+                        recovery_msg = (
+                            f"VERIFICATION FAILED for '{tool_name}': {reason}\n\n"
+                            f"You MUST try a different approach. Do NOT repeat the same action.\n"
+                            f"Current goal: {data.content}\n"
+                            f"Iteration: {agent.iteration}/{MAX_ITERATIONS}"
+                        )
+                        messages.append(_ChatMessage(role="user", content=recovery_msg))
+                        continue
+
+                    yield _sse("verification_passed", {
+                        "type": "tool_result",
+                        "tool": tool_name,
+                    })
+
+                    # Mark current todo task as completed
+                    current_task = agent.todo.get_current()
+                    if current_task and current_task.tool_name == tool_name:
+                        agent.todo.complete_task(current_task.id)
+                        yield _sse("todo_updated", agent.todo.to_dict())
+
                     # Feed result back to LLM with observation context
                     result_text = _json.dumps(result, default=str)[:2000]
                     agent.tool_results_context.append(f"[{tool_name}]: {result_text}")
 
+                    todo_summary = _json.dumps(agent.todo.to_dict())
                     observation_context = (
-                        f"Tool '{tool_name}' completed with status '{status}'.\n"
+                        f"Tool '{tool_name}' completed successfully.\n"
                         f"Result:\n{result_text}\n\n"
                         f"Facts: {', '.join(obs.facts)}\n\n"
-                        f"Use this information to continue. "
-                        f"If you have enough information, give your final answer. "
-                        f"Otherwise, call another tool."
+                        f"TODO LIST: {todo_summary}\n\n"
+                        f"Continue working on your tasks. "
+                        f"If all tasks are complete, verify and call 'complete'. "
+                        f"Otherwise, call the next tool."
                     )
                     messages.append(_ChatMessage(role="user", content=observation_context))
 
@@ -939,6 +1137,11 @@ async def send_agent_message(
                 yield chunk
         finally:
             _untrack_stream(conv_id)
+            try:
+                if session.is_active:
+                    await session.close()
+            except Exception:
+                pass
 
     return StreamingResponse(_tracked_agent_gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
@@ -948,6 +1151,76 @@ async def send_agent_message(
 def _sse(event: str, payload: dict) -> str:
     import json as _j
     return f"event: {event}\ndata: {_j.dumps(payload)}\n\n"
+
+
+async def _run_with_heartbeat(coro, timeout: float, heartbeat_interval: float = 25.0):
+    """Run a coroutine within `timeout` while yielding periodic heartbeat ticks
+    so the SSE connection and upstream proxies stay alive during long blocking
+    LLM calls.
+
+    Yields ("tick", None) every `heartbeat_interval` seconds while `coro` is
+    running, and finally ("result", value) once it completes. Raises
+    asyncio.TimeoutError if `timeout` elapses first.
+    """
+    import asyncio as _aio
+
+    task = _aio.create_task(coro)
+    elapsed = 0.0
+    try:
+        while True:
+            try:
+                value = await _aio.wait_for(
+                    _aio.shield(task), timeout=heartbeat_interval)
+            except _aio.TimeoutError:
+                elapsed += heartbeat_interval
+                if elapsed >= timeout:
+                    raise
+                yield ("tick", None)
+                continue
+            yield ("result", value)
+            return
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (_aio.CancelledError, Exception):
+                pass
+
+
+def _verify_tool_result(tool_name: str, result: dict) -> tuple[bool, str]:
+    """Objective verification of a tool result. Returns (passed, reason)."""
+    if result.get("error"):
+        return False, f"Tool error: {str(result['error'])[:200]}"
+
+    if tool_name in ("run_command", "run_powershell"):
+        exit_code = result.get("exit_code", -1)
+        if exit_code != 0:
+            stderr = result.get("stderr", "")[:200]
+            return False, f"Command failed (exit {exit_code}): {stderr}"
+
+    if tool_name == "file_write":
+        if not result.get("path"):
+            return False, "File write did not return a path"
+
+    if tool_name == "python_exec":
+        exit_code = result.get("exit_code", -1)
+        if exit_code is not None and exit_code != 0:
+            return False, f"Python execution failed (exit {exit_code})"
+
+    return True, "OK"
+
+
+def _build_verification_prompt(tool_name: str, result: dict, goal: str) -> str:
+    """Build context for LLM to understand a verification failure."""
+    result_summary = str(result)[:500]
+    return (
+        f"Verification FAILED for tool '{tool_name}'.\n"
+        f"Result: {result_summary}\n\n"
+        f"Original goal: {goal}\n\n"
+        f"Analyze what went wrong and try a different approach. "
+        f"Do NOT repeat the same failed action."
+    )
 
 
 async def _tool_args_for(name: str, content: str, user_id: str, db, kb_pref=None, user=None):
@@ -1073,6 +1346,19 @@ def _input_summary(tool_name: str, tool_input: dict) -> str:
         return f"Write: {tool_input.get('path', '')}"
     if tool_name == "file_list":
         return "List files"
+    if tool_name == "run_command":
+        return f"Shell: {tool_input.get('command', '')[:60]}"
+    if tool_name == "run_powershell":
+        script = tool_input.get("script", "")[:60]
+        return f"PS: {script}"
+    if tool_name == "spawn_subagent":
+        return f"Subagent: {tool_input.get('task', '')[:50]}"
+    if tool_name == "get_subagent_result":
+        return f"Get result: {tool_input.get('session_id', '')[:12]}"
+    if tool_name == "list_subagents":
+        return "List subagents"
+    if tool_name == "cancel_subagent":
+        return f"Cancel: {tool_input.get('session_id', '')[:12]}"
     return str(tool_input)[:80]
 
 
@@ -1112,6 +1398,15 @@ def _result_summary(tool_name: str, result: dict) -> str:
         return result.get("status", "completed")
     if tool_name in ("file_read", "file_write", "file_list", "file_delete"):
         return str(result.get("content", result.get("path", "done")))[:100]
+    if tool_name in ("run_command", "run_powershell"):
+        ec = result.get("exit_code", -1)
+        stdout = result.get("stdout", "")[:80]
+        status = "ok" if ec == 0 else f"exit {ec}"
+        return f"{status}: {stdout}"
+    if tool_name == "spawn_subagent":
+        return f"Spawned: {result.get('session_id', '')[:12]}"
+    if tool_name == "get_subagent_result":
+        return f"Status: {result.get('status', 'unknown')}"
     return result.get("status", "completed")
 
 
@@ -1158,6 +1453,70 @@ def _parse_verification(text: str) -> dict | None:
     if m2:
         try:
             return _json.loads(m2.group())
+        except Exception:
+            pass
+    return None
+
+
+def _parse_complete(text: str) -> dict | None:
+    """Extract complete action JSON from LLM response."""
+    import re as _re
+    cleaned = _re.sub(r"```(?:json)?\n?", "", text)
+    cleaned = _re.sub(r"```\n?", "", cleaned)
+    m = _re.search(r'\{[^{}]*"complete"\s*:\s*\{.*\}\s*\}', cleaned, _re.DOTALL)
+    if m:
+        try:
+            obj = _json.loads(m.group())
+            if isinstance(obj, dict) and "complete" in obj:
+                return obj["complete"]
+        except Exception:
+            pass
+    return None
+
+
+def _parse_replan(text: str) -> dict | None:
+    """Extract replan action JSON from LLM response."""
+    import re as _re
+    cleaned = _re.sub(r"```(?:json)?\n?", "", text)
+    cleaned = _re.sub(r"```\n?", "", cleaned)
+    m = _re.search(r'\{[^{}]*"replan"\s*:\s*\{.*\}\s*\}', cleaned, _re.DOTALL)
+    if m:
+        try:
+            obj = _json.loads(m.group())
+            if isinstance(obj, dict) and "replan" in obj:
+                return obj["replan"]
+        except Exception:
+            pass
+    return None
+
+
+def _parse_update_todo(text: str) -> dict | None:
+    """Extract update_todo action JSON from LLM response."""
+    import re as _re
+    cleaned = _re.sub(r"```(?:json)?\n?", "", text)
+    cleaned = _re.sub(r"```\n?", "", cleaned)
+    m = _re.search(r'\{[^{}]*"update_todo"\s*:\s*\{.*\}\s*\}', cleaned, _re.DOTALL)
+    if m:
+        try:
+            obj = _json.loads(m.group())
+            if isinstance(obj, dict) and "update_todo" in obj:
+                return obj["update_todo"]
+        except Exception:
+            pass
+    return None
+
+
+def _parse_spawn_subagent(text: str) -> dict | None:
+    """Extract spawn_subagent action JSON from LLM response."""
+    import re as _re
+    cleaned = _re.sub(r"```(?:json)?\n?", "", text)
+    cleaned = _re.sub(r"```\n?", "", cleaned)
+    m = _re.search(r'\{[^{}]*"spawn_subagent"\s*:\s*\{.*\}\s*\}', cleaned, _re.DOTALL)
+    if m:
+        try:
+            obj = _json.loads(m.group())
+            if isinstance(obj, dict) and "spawn_subagent" in obj:
+                return obj["spawn_subagent"]
         except Exception:
             pass
     return None

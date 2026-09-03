@@ -30,7 +30,8 @@ class AgentRun(Base, TimestampMixin):
     iteration_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    max_iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    max_iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    todo_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="agent_runs")
     tool_calls: Mapped[list["ToolCall"]] = relationship(

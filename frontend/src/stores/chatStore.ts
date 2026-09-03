@@ -2,6 +2,23 @@ import { create } from 'zustand'
 import type { ConversationDetail, ConversationResponse, CitationSource } from '../api/chat'
 import type { ToolCall } from '../components/chat/ToolCallCard'
 
+export interface TodoTask {
+  id: number
+  description: string
+  status: 'pending' | 'active' | 'completed' | 'failed' | 'retried'
+  tool_name?: string
+  subagent_type?: string
+  error?: string
+  retry_count?: number
+}
+
+export interface SubAgentInfo {
+  session_id: string
+  agent_type: string
+  task: string
+  status: string
+}
+
 export interface ActiveStream {
   convId: string
   streaming: boolean
@@ -11,6 +28,12 @@ export interface ActiveStream {
   lastError: string | null
   abortController: AbortController | null
   startedAt: number
+  // Agent state
+  todo: TodoTask[]
+  subagents: SubAgentInfo[]
+  agentState: string | null
+  verificationStatus: 'none' | 'started' | 'passed' | 'failed'
+  verificationType: string | null
 }
 
 interface ChatState {
@@ -58,6 +81,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       lastError: null,
       abortController: null,
       startedAt: Date.now(),
+      todo: [],
+      subagents: [],
+      agentState: null,
+      verificationStatus: 'none',
+      verificationType: null,
     }
     set((s) => ({
       activeStreams: { ...s.activeStreams, [convId]: stream },

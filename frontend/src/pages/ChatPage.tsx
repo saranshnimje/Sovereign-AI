@@ -11,6 +11,7 @@ import MessageBubble from '../components/chat/MessageBubble'
 import StreamingBubble from '../components/chat/StreamingBubble'
 import EvidencePanel from '../components/chat/EvidencePanel'
 import ToolCallCard, { ToolCall } from '../components/chat/ToolCallCard'
+import AgentActivity from '../components/chat/AgentActivity'
 
 interface ChatModelOption {
   providerId: string | null
@@ -45,10 +46,13 @@ export default function ChatPage() {
     () => (localStorage.getItem(lsKey+'.tm') as any) ?? 'auto')
   const [pluginMode, setPluginMode] = useState<'auto'|'none'>(
     () => (localStorage.getItem(lsKey+'.pm') as any) ?? 'auto')
+  const [agentMode, setAgentMode] = useState<'plan'|'agent'>(
+    () => (localStorage.getItem(lsKey+'.am') as any) ?? 'agent')
   useEffect(() => {
     localStorage.setItem(lsKey+'.tm', toolMode)
     localStorage.setItem(lsKey+'.pm', pluginMode)
-  }, [toolMode, pluginMode, lsKey])
+    localStorage.setItem(lsKey+'.am', agentMode)
+  }, [toolMode, pluginMode, agentMode, lsKey])
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -65,6 +69,10 @@ export default function ChatPage() {
   const streamSources = activeStream?.streamSources ?? []
   const toolCalls = activeStream?.toolCalls ?? []
   const lastError = activeStream?.lastError ?? null
+  const todo = activeStream?.todo ?? []
+  const subagents = activeStream?.subagents ?? []
+  const verificationStatus = activeStream?.verificationStatus ?? 'none'
+  const verificationType = activeStream?.verificationType ?? null
 
   // Load conversations on mount
   useEffect(() => {
@@ -178,7 +186,7 @@ export default function ChatPage() {
   // Core send function - runs in background even if user navigates away
   const doSend = useCallback(async (text: string, convIdParam: string | undefined, model: ChatModelOption) => {
     if (!text.trim()) return
-    const agentMode = toolMode !== 'none'
+    const useAgent = toolMode !== 'none'
 
     let currentConvId = convIdParam
     if (!currentConvId) {
@@ -198,28 +206,44 @@ export default function ChatPage() {
       toolCalls: [],
       lastError: null,
       abortController: controller,
+      todo: [],
+      subagents: [],
+      agentState: null,
+      verificationStatus: 'none',
     })
 
-    // Optimistically add user message to detail if we're viewing this conversation
+    // Optimistically add user message to detail so it's visible immediately
+    const userMsg = {
+      id: 'tmp-'+Date.now(), role: 'user' as const, content: text,
+      token_count: null, finish_reason: null,
+      created_at: new Date().toISOString(),
+    }
     if (currentConvId === convId) {
-      setDetail(prev => prev ? {...prev, messages: [...prev.messages, {
-        id: 'tmp-'+Date.now(), role: 'user', content: text,
-        token_count: null, finish_reason: null,
-        created_at: new Date().toISOString()}]} : prev)
+      // Viewing this conversation — add to existing detail
+      setDetail(prev => prev ? {...prev, messages: [...prev.messages, userMsg]} : prev)
+    } else {
+      // New conversation — create minimal detail so user sees their message
+      setDetail({
+        id: currentConvId!, title: text.slice(0, 80),
+        model_name: model.modelName, system_prompt: null, context_mode: 'chat',
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        message_count: 1, messages: [userMsg],
+      })
     }
 
     prefsApi.set(model.providerId, model.modelName).catch(() => {})
 
-    const endpoint = agentMode
+    const endpoint = useAgent
       ? `${API_BASE}/api/v1/chat/conversations/${currentConvId}/agent`
       : `${API_BASE}/api/v1/chat/conversations/${currentConvId}/messages`
 
     const body: Record<string, unknown> = {
       content: text, model_name: model.modelName, provider_id: model.providerId,
     }
-    if (agentMode) {
+    if (useAgent) {
       body.tool_mode = toolMode
       body.plugin_mode = pluginMode
+      body.agent_mode = agentMode
     }
 
     try {
@@ -282,6 +306,60 @@ export default function ChatPage() {
                   ...tc, status: 'error', error: d.error,
                 } : tc)
                 updateStream(currentConvId!, { toolCalls: [...tcAcc] })
+              } else if (ev === 'todo_updated') {
+                updateStream(currentConvId!, { todo: d.tasks || [] })
+              } else if (ev === 'todo_task_added') {
+                const stream = getStream(currentConvId!)
+                if (stream) {
+                  updateStream(currentConvId!, {
+                    todo: [...stream.todo, {
+                      id: d.task_id, description: d.description,
+                      status: d.status || 'pending',
+                    }],
+                  })
+                }
+              } else if (ev === 'agent_state') {
+                updateStream(currentConvId!, { agentState: d.state || null })
+              } else if (ev === 'verification_started') {
+                updateStream(currentConvId!, {
+                  verificationStatus: 'started',
+                  verificationType: d.type || null,
+                })
+              } else if (ev === 'verification_passed') {
+                updateStream(currentConvId!, {
+                  verificationStatus: 'passed',
+                  verificationType: d.type || null,
+                })
+              } else if (ev === 'verification_failed') {
+                updateStream(currentConvId!, {
+                  verificationStatus: 'failed',
+                  verificationType: d.type || null,
+                })
+              } else if (ev === 'subagent_spawned') {
+                const stream = getStream(currentConvId!)
+                if (stream) {
+                  updateStream(currentConvId!, {
+                    subagents: [...stream.subagents, {
+                      session_id: d.session_id,
+                      agent_type: d.agent_type,
+                      task: d.task,
+                      status: 'running',
+                    }],
+                  })
+                }
+              } else if (ev === 'subagent_completed') {
+                const stream = getStream(currentConvId!)
+                if (stream) {
+                  updateStream(currentConvId!, {
+                    subagents: stream.subagents.map(s =>
+                      s.session_id === d.session_id
+                        ? { ...s, status: 'completed' }
+                        : s
+                    ),
+                  })
+                }
+              } else if (ev === 'recovery_started') {
+                // Show recovery in UI
               } else if (ev === 'tool') {
                 tcAcc = [...tcAcc, {
                   call_id: d.call_id || `legacy-${Date.now()}`,
@@ -307,12 +385,18 @@ export default function ChatPage() {
     } catch (err: any) {
       if (err?.name === 'AbortError') {
         updateStream(currentConvId!, { streaming: false, lastError: 'Cancelled' })
-        setRetryData({ convId: convIdParam ?? '', text, model })
+        setRetryData({ convId: currentConvId!, text, model })
         return
       }
-      updateStream(currentConvId!, { lastError: err?.message || 'Send failed' })
-      setRetryData({ convId: convIdParam ?? '', text, model })
+      updateStream(currentConvId!, { streaming: false, lastError: err?.message || 'Send failed' })
+      setRetryData({ convId: currentConvId!, text, model })
       addToast({ type: 'error', title: 'Send failed', message: err?.message })
+      // Refetch conversation to sync state (removes optimistic message if server didn't save it)
+      try {
+        const updated = await chatApi.getConversation(currentConvId!)
+        setDetail(updated)
+        updateConversation(currentConvId!, { title: updated.title, message_count: updated.messages.length })
+      } catch { /* conversation may not exist yet */ }
     } finally {
       endStream(currentConvId!)
       inputRef.current?.focus()
@@ -330,7 +414,8 @@ export default function ChatPage() {
 
   const handleRetry = useCallback(() => {
     if (!retryData || isStreaming) return
-    doSend(retryData.text, retryData.convId || convId, retryData.model)
+    // Use the current URL's convId (not stale one from when error occurred)
+    doSend(retryData.text, convId || retryData.convId, retryData.model)
   }, [retryData, isStreaming, convId, doSend])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -561,9 +646,18 @@ export default function ChatPage() {
         {/* Agent Settings */}
         <details className="w-full border-b border-surface-border bg-surface-raised/60">
           <summary className="cursor-pointer select-none px-4 py-1.5 text-xs font-medium text-cyan-700">
-            ⚙️ Agent Settings {toolMode !== 'none' ? '(agent mode)' : '(direct chat)'}
+            ⚙️ Agent Settings ({agentMode === 'plan' ? 'plan mode' : agentMode === 'agent' && toolMode !== 'none' ? 'agent mode' : 'direct chat'})
           </summary>
           <div className="px-4 py-2 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div>
+              <p className="font-medium mb-1 text-neutral-400">Mode</p>
+              <select value={agentMode} onChange={e => setAgentMode(e.target.value as any)}
+                className="w-full rounded border border-surface-border bg-surface px-2 py-1 text-neutral-200"
+                aria-label="Agent mode">
+                <option value="plan">Plan (analyze only)</option>
+                <option value="agent">Agent (autonomous)</option>
+              </select>
+            </div>
             <div>
               <p className="font-medium mb-1 text-neutral-400">Tools</p>
               <select value={toolMode} onChange={e => setToolMode(e.target.value as any)}
@@ -610,6 +704,15 @@ export default function ChatPage() {
             <ToolCallCard calls={toolCalls} />
           )}
 
+          {(todo.length > 0 || subagents.length > 0 || verificationStatus !== 'none') && isStreaming && (
+            <AgentActivity
+              todo={todo}
+              subagents={subagents}
+              verificationStatus={verificationStatus}
+              verificationType={verificationType}
+            />
+          )}
+
           {isStreaming && (
             <StreamingBubble
               content={streamContent}
@@ -634,7 +737,7 @@ export default function ChatPage() {
               <div className="flex items-start gap-2">
                 <span className="text-red-400 mt-0.5">⚠</span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-red-400 font-medium">AI Error</p>
+                  <p className="text-red-400 font-medium">Failed to get response</p>
                   <p className="text-red-300/80 mt-0.5 break-words">{lastError}</p>
                   <p className="text-neutral-500 mt-1">Model: {activeModel.modelName} · Provider: {activeModel.providerName}</p>
                 </div>
@@ -644,7 +747,7 @@ export default function ChatPage() {
                     ↻ Retry
                   </button>
                 )}
-                <button onClick={() => updateStream(convId!, { lastError: null })}
+                <button onClick={() => { updateStream(convId!, { lastError: null }); setRetryData(null) }}
                   className="px-1 text-neutral-500 hover:text-neutral-300 flex-shrink-0">✕</button>
               </div>
             </div>

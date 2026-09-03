@@ -19,6 +19,16 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+# Safety limits — increased for autonomous operation
+MAX_ITERATIONS = 50
+MAX_TOOL_CALLS = 30
+MAX_EXECUTION_TIME_SECONDS = 600  # 10 minutes
+MAX_PLAN_STEPS = 20
+MAX_RETRIES = 3
+MAX_RETRIES_PER_TOOL = 2
+MAX_TODO_TASKS = 30
+MAX_SUBAGENT_CONCURRENT = 5
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,13 +111,166 @@ class VerificationResult:
     details: str = ""
 
 
-# Safety limits
-MAX_ITERATIONS = 10
-MAX_TOOL_CALLS = 8
-MAX_EXECUTION_TIME_SECONDS = 300
-MAX_PLAN_STEPS = 10
-MAX_RETRIES = 2
-MAX_RETRIES_PER_TOOL = 1
+@dataclass
+class TodoTask:
+    """A single task in the agent's dynamic todo list."""
+    id: int
+    description: str
+    status: str = "pending"  # pending | active | completed | failed | retried
+    tool_name: str | None = None
+    subagent_type: str | None = None
+    error: str | None = None
+    retry_count: int = 0
+    created_at: float = field(default_factory=time.monotonic)
+    completed_at: float | None = None
+
+
+class TodoManager:
+    """
+    Dynamic task list that the agent can modify during execution.
+    Supports add, complete, fail, retry, insert, reorder, split.
+    """
+
+    def __init__(self) -> None:
+        self.tasks: list[TodoTask] = []
+        self._next_id: int = 1
+
+    def add_task(self, description: str, tool_name: str | None = None,
+                 subagent_type: str | None = None, after_id: int | None = None) -> TodoTask:
+        """Add a new task. If after_id is given, insert after that task."""
+        if len(self.tasks) >= MAX_TODO_TASKS:
+            raise RuntimeError(f"Todo limit reached ({MAX_TODO_TASKS})")
+        task = TodoTask(
+            id=self._next_id,
+            description=description,
+            tool_name=tool_name,
+            subagent_type=subagent_type,
+        )
+        self._next_id += 1
+        if after_id is not None:
+            idx = next((i for i, t in enumerate(self.tasks) if t.id == after_id), None)
+            if idx is not None:
+                self.tasks.insert(idx + 1, task)
+                return task
+        self.tasks.append(task)
+        return task
+
+    def complete_task(self, task_id: int) -> TodoTask | None:
+        """Mark a task as completed."""
+        task = self._find(task_id)
+        if task:
+            task.status = "completed"
+            task.completed_at = time.monotonic()
+        return task
+
+    def fail_task(self, task_id: int, error: str = "") -> TodoTask | None:
+        """Mark a task as failed."""
+        task = self._find(task_id)
+        if task:
+            task.status = "failed"
+            task.error = error[:500]
+        return task
+
+    def retry_task(self, task_id: int) -> TodoTask | None:
+        """Mark a task for retry (resets to pending, increments count)."""
+        task = self._find(task_id)
+        if task and task.retry_count < MAX_RETRIES_PER_TOOL:
+            task.status = "retried"
+            task.retry_count += 1
+            task.error = None
+            task.completed_at = None
+            return task
+        return None
+
+    def start_task(self, task_id: int) -> TodoTask | None:
+        """Mark a task as actively being worked on."""
+        task = self._find(task_id)
+        if task and task.status in ("pending", "retried"):
+            task.status = "active"
+        return task
+
+    def get_current(self) -> TodoTask | None:
+        """Get the current active task, or the next pending one."""
+        active = next((t for t in self.tasks if t.status == "active"), None)
+        if active:
+            return active
+        return next((t for t in self.tasks if t.status in ("pending", "retried")), None)
+
+    def get_pending_count(self) -> int:
+        return sum(1 for t in self.tasks if t.status in ("pending", "retried", "active"))
+
+    def split_task(self, task_id: int, new_descriptions: list[str]) -> list[TodoTask]:
+        """Split a task into multiple sub-tasks."""
+        task = self._find(task_id)
+        if not task:
+            return []
+        idx = next((i for i, t in enumerate(self.tasks) if t.id == task_id), None)
+        if idx is None:
+            return []
+        # Remove original and insert replacements
+        self.tasks.pop(idx)
+        new_tasks = []
+        for desc in reversed(new_descriptions):
+            new_task = TodoTask(
+                id=self._next_id,
+                description=desc,
+                tool_name=task.tool_name,
+                subagent_type=task.subagent_type,
+            )
+            self._next_id += 1
+            self.tasks.insert(idx, new_task)
+            new_tasks.append(new_task)
+        return list(reversed(new_tasks))
+
+    def reorder(self, new_order: list[int]) -> None:
+        """Reorder tasks by list of task IDs."""
+        task_map = {t.id: t for t in self.tasks}
+        reordered = [task_map[tid] for tid in new_order if tid in task_map]
+        # Append any tasks not in new_order
+        seen = set(new_order)
+        reordered.extend(t for t in self.tasks if t.id not in seen)
+        self.tasks = reordered
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for SSE and DB storage."""
+        current = self.get_current()
+        return {
+            "tasks": [
+                {
+                    "id": t.id,
+                    "description": t.description,
+                    "status": t.status,
+                    "tool_name": t.tool_name,
+                    "subagent_type": t.subagent_type,
+                    "error": t.error,
+                    "retry_count": t.retry_count,
+                }
+                for t in self.tasks
+            ],
+            "current_task_id": current.id if current else None,
+            "pending_count": self.get_pending_count(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TodoManager":
+        """Restore from serialized data."""
+        mgr = cls()
+        for t in data.get("tasks", []):
+            task = TodoTask(
+                id=t["id"],
+                description=t["description"],
+                status=t.get("status", "pending"),
+                tool_name=t.get("tool_name"),
+                subagent_type=t.get("subagent_type"),
+                error=t.get("error"),
+                retry_count=t.get("retry_count", 0),
+            )
+            mgr.tasks.append(task)
+            mgr._next_id = max(mgr._next_id, task.id + 1)
+        return mgr
+
+    def _find(self, task_id: int) -> TodoTask | None:
+        return next((t for t in self.tasks if t.id == task_id), None)
 
 
 class AgentStateMachine:
@@ -130,6 +293,7 @@ class AgentStateMachine:
         self.error_message: str = ""
         self.activity: list[dict[str, Any]] = []
         self.tool_results_context: list[str] = []
+        self.todo: TodoManager = TodoManager()
 
     def transition(
         self, to_state: AgentState, reason: str = "", metadata: dict[str, Any] | None = None
@@ -169,6 +333,7 @@ class AgentStateMachine:
         self.error_message = ""
         self.activity.clear()
         self.tool_results_context.clear()
+        self.todo = TodoManager()
         self.transition(AgentState.UNDERSTANDING, reason=f"Goal: {goal[:100]}")
 
     def create_plan(self, steps: list[dict[str, str]]) -> None:
@@ -315,5 +480,6 @@ class AgentStateMachine:
                 "failed_tools": self.verification.failed_tools,
                 "details": self.verification.details,
             } if self.verification else None,
+            "todo": self.todo.to_dict(),
             "error": self.error_message or None,
         }

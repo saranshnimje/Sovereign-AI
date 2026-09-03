@@ -44,6 +44,13 @@ const TOOL_ICONS: Record<string, string> = {
   model_select: '🤖',
   time_now: '🕐',
   python_exec: '🐍',
+  run_command: '💻',
+  run_powershell: '⚡',
+  spawn_subagent: '🤖',
+  get_subagent_result: '📥',
+  list_subagents: '📋',
+  cancel_subagent: '🚫',
+  search_org_data: '🏢',
 }
 
 function formatDuration(ms?: number): string {

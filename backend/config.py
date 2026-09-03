@@ -80,9 +80,18 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
 
     # ---- Agent ----
-    default_max_iterations: int = 10
+    default_max_iterations: int = 50
+    default_max_tool_calls: int = 30
+    default_max_execution_time_s: int = 600  # 10 minutes
     default_approval_risk_level: str = "high"
     approval_timeout_minutes: int = 5
+    agent_max_subagent_depth: int = 10
+    agent_max_subagent_concurrent: int = 5
+
+    # ---- Terminal tools ----
+    terminal_enabled: bool = True
+    terminal_timeout_s: int = 30
+    terminal_max_timeout_s: int = 120
 
     # ---- Sandbox ----
     sandbox_image: str = "python:3.11-slim"

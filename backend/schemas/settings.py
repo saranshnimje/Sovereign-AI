@@ -39,8 +39,8 @@ class SystemSettings(BaseModel):
     @field_validator("default_max_iterations")
     @classmethod
     def valid_iterations(cls, v: int) -> int:
-        if not 1 <= v <= 20:
-            raise ValueError("Max iterations must be 1–20")
+        if not 1 <= v <= 50:
+            raise ValueError("Max iterations must be 1–50")
         return v
 
     @field_validator("approval_timeout_minutes")
