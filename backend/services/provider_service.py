@@ -288,11 +288,12 @@ class ProviderService:
                 discovery_error = "Connected, but model listing is not supported by this endpoint"
                 logger.warning("test_connection provider=%s list_models exception: %s", provider_id, exc)
 
-            # Deep auth check: public /models endpoints on cloud gateways make a
-            # bare health check meaningless when an API key is stored. A 1-token
-            # probe enforces real authentication. (Ollama etc. skip this.)
+            # Skip deep auth probe when models were already listed — that already
+            # proves the key works and avoids false negatives on providers where
+            # free models use different endpoints (e.g. OpenCode Zen uses
+            # /v1/responses for some models, not /v1/chat/completions).
             verify = getattr(client, "verify_auth", None)
-            if verify is not None and p.api_key and not discovery_error:
+            if verify is not None and p.api_key and models_found is None:
                 try:
                     auth_ok, auth_msg = await verify(first_model)
                 except Exception:
