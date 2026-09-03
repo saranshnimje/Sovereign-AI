@@ -896,15 +896,14 @@ class CohereProvider(BaseLLMProvider):
             return False, None
 
     async def list_models(self) -> list[dict]:
-        try:
-            resp = await self._get_client().get(
-                "/models", headers=self._headers(), timeout=5.0
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            # Cohere v2 returns {"models": [...]} or {"data": [...]}
-            models = data.get("models") or data.get("data", [])
-            return [{"id": m.get("id", m.get("name", "")), **m} if isinstance(m, dict) else {"id": m} for m in models]
+        resp = await self._get_client().get(
+            "/models", headers=self._headers(), timeout=5.0
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # Cohere v2 returns {"models": [...]} or {"data": [...]}
+        models = data.get("models") or data.get("data", [])
+        return [{"id": m.get("id", m.get("name", "")), **m} if isinstance(m, dict) else {"id": m} for m in models]
 
     async def verify_auth(self, model: str | None = None) -> tuple[bool | None, str | None]:
         if not self._api_key or not model:
