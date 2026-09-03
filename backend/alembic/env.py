@@ -44,12 +44,13 @@ target_metadata = Base.metadata
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode (emit SQL to stdout)."""
     url = config.get_main_option("sqlalchemy.url")
+    is_pg = url.startswith("postgresql")
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=True,  # SQLite-friendly ALTERs
+        render_as_batch=not is_pg,
     )
 
     with context.begin_transaction():
@@ -57,10 +58,12 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
+    url = config.get_main_option("sqlalchemy.url")
+    is_pg = url.startswith("postgresql")
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
-        render_as_batch=True,  # SQLite-friendly ALTERs
+        render_as_batch=not is_pg,
     )
 
     with context.begin_transaction():

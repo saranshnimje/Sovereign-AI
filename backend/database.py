@@ -1,12 +1,9 @@
 """
 Async SQLAlchemy engine and session factory.
 
-SQLite concurrency strategy for the MVP:
-- StaticPool: reuses a single underlying connection — serialises all writes
-  and eliminates "database is locked" entirely at the application layer.
-- WAL mode still improves read performance and is set at startup.
-- For a prototype with ≤10 concurrent users on a single node, StaticPool is
-  the correct and simplest solution. PostgreSQL can replace this for production.
+Supports both SQLite (local dev / Docker) and PostgreSQL (cloud deployment).
+- SQLite: StaticPool, WAL mode, check_same_thread disabled.
+- PostgreSQL: standard pool, no SQLite-specific pragmas.
 """
 from datetime import datetime, timezone
 
@@ -17,7 +14,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import StaticPool
 from sqlalchemy.types import DateTime, TypeDecorator
 
 from config import get_settings
@@ -43,14 +39,23 @@ class UTCDateTime(TypeDecorator):
 
 settings = get_settings()
 
-engine = create_async_engine(
-    settings.database_url,
-    echo=False,
-    connect_args={"check_same_thread": False},
-    # StaticPool reuses a single underlying sqlite3 connection, which
-    # completely eliminates write-lock contention at the SQLAlchemy level.
-    poolclass=StaticPool,
-)
+_is_postgres = settings.database_url.startswith("postgresql")
+
+
+if _is_postgres:
+    engine = create_async_engine(
+        settings.database_url,
+        echo=False,
+        pool_pre_ping=True,
+    )
+else:
+    from sqlalchemy.pool import StaticPool
+    engine = create_async_engine(
+        settings.database_url,
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
 
 
 AsyncSessionLocal = async_sessionmaker(
@@ -67,11 +72,12 @@ class Base(DeclarativeBase):
 
 
 async def init_db() -> None:
-    """Create all tables on startup and enable SQLite pragmas."""
+    """Create all tables on startup. SQLite pragmas applied only for SQLite."""
     async with engine.begin() as conn:
-        await conn.execute(text("PRAGMA journal_mode=WAL"))
-        await conn.execute(text("PRAGMA foreign_keys=ON"))
-        await conn.execute(text("PRAGMA synchronous=NORMAL"))
+        if not _is_postgres:
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA foreign_keys=ON"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL"))
         import models  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
 
