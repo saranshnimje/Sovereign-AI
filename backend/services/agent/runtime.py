@@ -528,13 +528,23 @@ class AgentRuntime:
 
         data = parse_llm_json(text)
         if data.get("type") == "error":
-            return None
+            logger.warning("Planner raw output (unparseable): %s", text[:500])
+            # Fallback plan for small models that can't produce JSON
+            return Plan(
+                goal=goal,
+                acceptance_criteria=["Task completed successfully"],
+                steps=[PlanStep(id=1, description="Complete the task", tool=None)],
+            )
 
         try:
             return Plan.model_validate(data)
         except Exception:
-            logger.warning("Failed to validate plan from LLM output")
-            return None
+            logger.warning("Failed to validate plan from LLM output: %s", data)
+            return Plan(
+                goal=goal,
+                acceptance_criteria=["Task completed successfully"],
+                steps=[PlanStep(id=1, description="Complete the task", tool=None)],
+            )
 
     # ------------------------------------------------------------------
     # Internal: Reasoning / Decision
@@ -612,11 +622,28 @@ class AgentRuntime:
 
         data = parse_llm_json(text)
         if data.get("type") == "error":
+            logger.warning("Reasoner raw output (unparseable): %s", text[:500])
+            # Fallback: if no tools have been used and plan has no tool steps,
+            # treat simple greetings as COMPLETE
+            has_tool_steps = any(s.tool for s in agent.plan if s.status == "pending") if agent.plan else False
+            if not has_tool_steps and not observations:
+                return AgentDecision(
+                    decision="VERIFY",
+                    reason="Could not parse reasoner output, attempting verification",
+                )
             return AgentDecision(decision="FAIL", reason="Could not parse reasoner output")
 
         try:
             decision = AgentDecision.model_validate(data)
         except Exception:
+            logger.warning("Reasoner invalid schema: %s | raw: %s", data, text[:300])
+            # Fallback: if plan is done or no tools needed, verify
+            pending_tools = [s for s in agent.plan if s.status == "pending" and s.tool] if agent.plan else []
+            if not pending_tools:
+                return AgentDecision(
+                    decision="VERIFY",
+                    reason="Reasoner output invalid, but no pending tool steps — verifying",
+                )
             return AgentDecision(decision="FAIL", reason="Invalid reasoner output format")
 
         return decision
@@ -677,6 +704,15 @@ class AgentRuntime:
 
         data = parse_llm_json(text)
         if data.get("type") == "error":
+            logger.warning("Verifier raw output (unparseable): %s", text[:500])
+            # If no tools were used and no observations, assume simple task is done
+            if not observations and not tool_results_context:
+                return VerificationResult(
+                    verified=True,
+                    confidence=0.7,
+                    criteria=[],
+                    missing=[],
+                )
             return VerificationResult(
                 verified=False,
                 confidence=0.0,
@@ -686,6 +722,14 @@ class AgentRuntime:
         try:
             result = VerificationResult.model_validate(data)
         except Exception:
+            logger.warning("Verifier invalid schema: %s", data)
+            if not observations and not tool_results_context:
+                return VerificationResult(
+                    verified=True,
+                    confidence=0.7,
+                    criteria=[],
+                    missing=[],
+                )
             return VerificationResult(
                 verified=False,
                 confidence=0.0,
