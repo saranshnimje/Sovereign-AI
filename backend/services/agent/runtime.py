@@ -200,12 +200,29 @@ class AgentRuntime:
 
             # === PHASE: MAIN AGENT LOOP ===
             for iteration in range(MAX_ITERATIONS):
+                # Check if already in terminal state (e.g. cancelled between iterations)
+                if agent.state in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
+                    break
+
                 # Check safety limits
                 limit_error = agent.check_limits()
                 if limit_error:
                     agent.fail(limit_error)
                     yield _sse("agent_state", agent.to_dict())
                     yield _sse("error", {"message": limit_error})
+                    yield _sse("done", {
+                        "token_count": 0,
+                        "activity": agent.activity,
+                        "tool_calls": agent.tool_call_count,
+                        "state": agent.state.value,
+                        "elapsed_ms": agent.get_elapsed_ms(),
+                        "plan": [
+                            {"id": s.id, "description": s.description, "status": s.status}
+                            for s in agent.plan
+                        ],
+                        "observations": [],
+                        "verification": None,
+                    })
                     return
 
                 # --- REASON: Decide what to do next ---
@@ -227,6 +244,10 @@ class AgentRuntime:
                     "iteration": iteration,
                 })
 
+                # If agent was cancelled during _decide, break
+                if agent.state in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
+                    break
+
                 match decision.decision:
                     case "COMPLETE":
                         # MUST go through verifier
@@ -237,6 +258,7 @@ class AgentRuntime:
                             agent=agent,
                             evidence=evidence,
                             tool_results_context=tool_results_context,
+                            observations=observations,
                         )
                         yield _sse("verification", verification.model_dump())
 
@@ -281,6 +303,7 @@ class AgentRuntime:
                             agent=agent,
                             evidence=evidence,
                             tool_results_context=tool_results_context,
+                            observations=observations,
                         )
                         yield _sse("verification", verification.model_dump())
 
@@ -435,6 +458,8 @@ class AgentRuntime:
 
                     case "ASK_USER":
                         final_content = decision.reason
+                        agent.fail("Waiting for user input")
+                        yield _sse("agent_state", agent.to_dict())
                         yield _sse("token", {"delta": decision.reason})
                         break
 
@@ -442,6 +467,19 @@ class AgentRuntime:
                         agent.fail(decision.reason)
                         yield _sse("agent_state", agent.to_dict())
                         yield _sse("error", {"message": decision.reason})
+                        yield _sse("done", {
+                            "token_count": 0,
+                            "activity": agent.activity,
+                            "tool_calls": agent.tool_call_count,
+                            "state": agent.state.value,
+                            "elapsed_ms": agent.get_elapsed_ms(),
+                            "plan": [
+                                {"id": s.id, "description": s.description, "status": s.status}
+                                for s in agent.plan
+                            ],
+                            "observations": [],
+                            "verification": None,
+                        })
                         return
 
             else:
@@ -453,21 +491,43 @@ class AgentRuntime:
                 yield _sse("error", {"message": "Max iterations reached"})
 
         except asyncio.CancelledError:
-            agent.cancel()
+            if agent.state != AgentState.CANCELLED:
+                agent.cancel()
             yield _sse("agent_state", agent.to_dict())
             yield _sse("cancelled", {"message": "Cancelled"})
+            yield _sse("done", {
+                "token_count": 0,
+                "activity": agent.activity,
+                "tool_calls": agent.tool_call_count,
+                "state": agent.state.value,
+                "elapsed_ms": agent.get_elapsed_ms(),
+                "plan": [],
+                "observations": [],
+                "verification": None,
+            })
             return
         except Exception as exc:
             logger.exception("Agent runtime error: %s", exc)
-            agent.fail(str(exc)[:200])
+            if agent.state not in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
+                agent.fail(str(exc)[:200])
             yield _sse("agent_state", agent.to_dict())
             yield _sse("error", {"message": f"Agent error: {str(exc)[:200]}"})
+            yield _sse("done", {
+                "token_count": 0,
+                "activity": agent.activity,
+                "tool_calls": agent.tool_call_count,
+                "state": agent.state.value,
+                "elapsed_ms": agent.get_elapsed_ms(),
+                "plan": [],
+                "observations": [],
+                "verification": None,
+            })
             return
 
         # === FINALIZE ===
-        if agent.state not in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
-            agent.complete()
-            yield _sse("agent_state", agent.to_dict())
+        # Do NOT call agent.complete() here.
+        # COMPLETED is only set after successful verification (lines 245, 289).
+        # All other terminal states (FAILED, CANCELLED) are set explicitly in the loop.
 
         # Stream final answer as tokens
         for i in range(0, len(final_content), 4):
@@ -657,6 +717,7 @@ class AgentRuntime:
         agent: AgentStateMachine,
         evidence: list[str],
         tool_results_context: list[str],
+        observations: list[Observation] | None = None,
     ) -> VerificationResult:
         """Verify that the goal has been actually achieved."""
         criteria_text = "\n".join(
@@ -706,7 +767,8 @@ class AgentRuntime:
         if data.get("type") == "error":
             logger.warning("Verifier raw output (unparseable): %s", text[:500])
             # If no tools were used and no observations, assume simple task is done
-            if not observations and not tool_results_context:
+            obs_list = observations or []
+            if not obs_list and not tool_results_context:
                 return VerificationResult(
                     verified=True,
                     confidence=0.7,
@@ -723,7 +785,8 @@ class AgentRuntime:
             result = VerificationResult.model_validate(data)
         except Exception:
             logger.warning("Verifier invalid schema: %s", data)
-            if not observations and not tool_results_context:
+            obs_list = observations or []
+            if not obs_list and not tool_results_context:
                 return VerificationResult(
                     verified=True,
                     confidence=0.7,

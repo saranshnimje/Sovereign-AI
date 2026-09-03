@@ -196,8 +196,6 @@ async def test_retry_bounded():
     from services.agent_state import MAX_TOOL_CALLS, MAX_ITERATIONS
 
     agent = AgentStateMachine()
-    agent.start("test")
-    agent.create_plan([{"description": "use tool", "tool_name": "calculator"}])
 
     # Planner returns valid plan, reasoner keeps saying RETRY
     async def mock_chat(**kwargs):
@@ -225,6 +223,7 @@ async def test_retry_bounded():
     async for event in runtime.run(
         goal="test", user_id="u1", user_role="admin", model="test",
         llm=llm, db=MagicMock(), tool_names=["calculator"], tool_descriptions="calculator: basic math",
+        agent_state=agent,
     ):
         if "tool_call" in event:
             tool_call_count += 1
@@ -240,8 +239,6 @@ async def test_per_tool_retry_enforced_on_failure():
     from services.agent_state import MAX_RETRIES_PER_TOOL, MAX_ITERATIONS
 
     agent = AgentStateMachine()
-    agent.start("test")
-    agent.create_plan([{"description": "use tool", "tool_name": "calculator"}])
 
     call_count = {"n": 0}
 
@@ -286,3 +283,218 @@ async def test_per_tool_retry_enforced_on_failure():
     # Loop continues via reasoner RETRY until MAX_ITERATIONS.
     assert tool_call_count <= MAX_ITERATIONS + 5, \
         f"Tool calls ({tool_call_count}) exceeded MAX_ITERATIONS ({MAX_ITERATIONS}) with margin"
+
+
+# ------------------------------------------------------------------
+# Completion authority regression tests
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_max_iterations_without_verification_is_failed():
+    """Max iterations reached without verification → FAILED, never COMPLETED."""
+    agent = AgentStateMachine()
+
+    async def mock_chat(**kwargs):
+        messages = kwargs.get("messages", [])
+        system_msg = messages[0].content if messages else ""
+        if "PLANNER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "goal": "test",
+                "acceptance_criteria": ["done"],
+                "steps": [{"id": 1, "description": "use tool", "tool": "calculator", "success_criteria": "ok"}]
+            }))
+        if "REASONER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "decision": "RETRY",
+                "reason": "keep trying",
+                "next_action": {"tool": "calculator", "input": {"expression": "1+1"}, "reasoning": "retry"}
+            }))
+        return MagicMock(content=json.dumps({"decision": "FAIL", "reason": "give up"}))
+
+    llm = MagicMock()
+    llm.chat = mock_chat
+    runtime = AgentRuntime()
+
+    events = []
+    async for event in runtime.run(
+        goal="test", user_id="u1", user_role="admin", model="test",
+        llm=llm, db=MagicMock(), tool_names=["calculator"], tool_descriptions="calc",
+        agent_state=agent,
+    ):
+        events.append(event)
+
+    assert agent.state.value == "failed", f"Expected failed, got {agent.state.value}"
+    done_events = [e for e in events if e.startswith("event: done")]
+    assert len(done_events) == 1
+    assert '"state": "failed"' in done_events[0]
+
+
+@pytest.mark.asyncio
+async def test_verification_false_is_not_completed():
+    """Verifier returns verified=false → NOT completed."""
+    agent = AgentStateMachine()
+
+    async def mock_chat(**kwargs):
+        messages = kwargs.get("messages", [])
+        system_msg = messages[0].content if messages else ""
+        if "REASONER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "decision": "VERIFY",
+                "reason": "verifying",
+                "next_action": None
+            }))
+        if "VERIFIER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "verified": False,
+                "confidence": 0.1,
+                "criteria": [],
+                "missing": ["not done"],
+                "unsupported_claims": []
+            }))
+        return MagicMock(content=json.dumps({"decision": "FAIL", "reason": "give up"}))
+
+    llm = MagicMock()
+    llm.chat = mock_chat
+    runtime = AgentRuntime()
+
+    events = []
+    async for event in runtime.run(
+        goal="test", user_id="u1", user_role="admin", model="test",
+        llm=llm, db=MagicMock(), tool_names=[], tool_descriptions="",
+        agent_state=agent,
+    ):
+        events.append(event)
+
+    assert agent.state.value != "completed", "Agent should NOT be completed when verification fails"
+
+
+@pytest.mark.asyncio
+async def test_successful_verification_is_completed():
+    """Successful verification → COMPLETED."""
+    agent = AgentStateMachine()
+
+    async def mock_chat(**kwargs):
+        messages = kwargs.get("messages", [])
+        system_msg = messages[0].content if messages else ""
+        if "REASONER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "decision": "VERIFY",
+                "reason": "done",
+                "next_action": None
+            }))
+        if "VERIFIER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "verified": True,
+                "confidence": 0.95,
+                "criteria": [],
+                "missing": [],
+                "unsupported_claims": []
+            }))
+        return MagicMock(content=json.dumps({"decision": "FAIL", "reason": "should not reach"}))
+
+    llm = MagicMock()
+    llm.chat = mock_chat
+    runtime = AgentRuntime()
+
+    events = []
+    async for event in runtime.run(
+        goal="test", user_id="u1", user_role="admin", model="test",
+        llm=llm, db=MagicMock(), tool_names=[], tool_descriptions="",
+        agent_state=agent,
+    ):
+        events.append(event)
+
+    assert agent.state.value == "completed", f"Expected completed, got {agent.state.value}"
+    done_events = [e for e in events if e.startswith("event: done")]
+    assert len(done_events) == 1
+    assert '"state": "completed"' in done_events[0]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_is_not_completed():
+    """Cancellation → CANCELLED, never COMPLETED."""
+    from services.agent_state import MAX_ITERATIONS
+
+    agent = AgentStateMachine()
+
+    call_count = {"n": 0}
+    async def smart_chat(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] > 3:
+            agent.cancel()
+            return MagicMock(content=json.dumps({"decision": "FAIL", "reason": "cancelled"}))
+        messages = kwargs.get("messages", [])
+        system_msg = messages[0].content if messages else ""
+        if "PLANNER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "goal": "test",
+                "acceptance_criteria": ["done"],
+                "steps": [{"id": 1, "description": "use tool", "tool": "calculator", "success_criteria": "ok"}]
+            }))
+        if "REASONER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "decision": "RETRY",
+                "reason": "keep trying",
+                "next_action": {"tool": "calculator", "input": {"expression": "1+1"}, "reasoning": "retry"}
+            }))
+        return MagicMock(content=json.dumps({"decision": "FAIL", "reason": "give up"}))
+
+    llm = MagicMock()
+    llm.chat = smart_chat
+    runtime = AgentRuntime()
+
+    events = []
+    async for event in runtime.run(
+        goal="test", user_id="u1", user_role="admin", model="test",
+        llm=llm, db=MagicMock(), tool_names=["calculator"], tool_descriptions="calc",
+        agent_state=agent,
+    ):
+        events.append(event)
+
+    assert agent.state.value == "cancelled", f"Expected cancelled, got {agent.state.value}"
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_exhausted_retries_is_failed():
+    """Tool fails repeatedly, retries exhausted → FAILED, never COMPLETED."""
+    from services.agent_state import MAX_RETRIES_PER_TOOL
+
+    agent = AgentStateMachine()
+
+    async def mock_chat(**kwargs):
+        messages = kwargs.get("messages", [])
+        system_msg = messages[0].content if messages else ""
+        if "PLANNER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "goal": "test",
+                "acceptance_criteria": ["done"],
+                "steps": [{"id": 1, "description": "use tool", "tool": "calculator", "success_criteria": "ok"}]
+            }))
+        if "REASONER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "decision": "RETRY",
+                "reason": "retry",
+                "next_action": {"tool": "calculator", "input": {"expression": "1+1"}, "reasoning": "retry"}
+            }))
+        return MagicMock(content=json.dumps({"decision": "FAIL", "reason": "give up"}))
+
+    llm = MagicMock()
+    llm.chat = mock_chat
+    runtime = AgentRuntime()
+
+    # Tool always fails with transient error
+    async def mock_execute(tool_name, tool_input, **kwargs):
+        return {"error": "connection timeout"}
+
+    with patch.object(runtime, '_execute_tool', mock_execute):
+        events = []
+        async for event in runtime.run(
+            goal="test", user_id="u1", user_role="admin", model="test",
+            llm=llm, db=MagicMock(), tool_names=["calculator"], tool_descriptions="calc",
+            agent_state=agent,
+        ):
+            events.append(event)
+
+    # Should end in failed (max iterations or exhausted retries)
+    assert agent.state.value == "failed", f"Expected failed, got {agent.state.value}"
+    assert agent.state.value != "completed"
