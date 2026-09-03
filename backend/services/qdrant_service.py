@@ -31,7 +31,10 @@ class QdrantService:
     def _get_client(self):
         if self._client is None:
             from qdrant_client import QdrantClient  # type: ignore
-            self._client = QdrantClient(url=self.settings.qdrant_url, timeout=10)
+            kwargs: dict[str, Any] = {"url": self.settings.qdrant_url, "timeout": 10}
+            if self.settings.qdrant_api_key:
+                kwargs["api_key"] = self.settings.qdrant_api_key
+            self._client = QdrantClient(**kwargs)
         return self._client
 
     # ------------------------------------------------------------------

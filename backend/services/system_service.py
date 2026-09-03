@@ -28,22 +28,28 @@ async def get_system_status() -> SystemStatus:
     services: dict[str, ServiceStatus] = {}
 
     # --- Ollama health ---
-    try:
-        t0 = time.monotonic()
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(settings.ollama_url + "/")
-        latency = int((time.monotonic() - t0) * 1000)
-        services["ollama"] = ServiceStatus(
-            status="up" if resp.status_code < 500 else "down", latency_ms=latency
-        )
-    except Exception as exc:
-        services["ollama"] = ServiceStatus(status="down", detail=str(exc)[:120])
+    if settings.ollama_url:
+        try:
+            t0 = time.monotonic()
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(settings.ollama_url + "/")
+            latency = int((time.monotonic() - t0) * 1000)
+            services["ollama"] = ServiceStatus(
+                status="up" if resp.status_code < 500 else "down", latency_ms=latency
+            )
+        except Exception as exc:
+            services["ollama"] = ServiceStatus(status="down", detail=str(exc)[:120])
+    else:
+        services["ollama"] = ServiceStatus(status="down", detail="not configured")
 
     # --- Qdrant health ---
     try:
         t0 = time.monotonic()
+        qdrant_headers = {}
+        if settings.qdrant_api_key:
+            qdrant_headers["api-key"] = settings.qdrant_api_key
         async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(settings.qdrant_url + "/healthz")
+            resp = await client.get(settings.qdrant_url + "/healthz", headers=qdrant_headers)
         latency = int((time.monotonic() - t0) * 1000)
         services["qdrant"] = ServiceStatus(
             status="up" if resp.status_code == 200 else "down", latency_ms=latency

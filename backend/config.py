@@ -49,6 +49,7 @@ class Settings(BaseSettings):
 
     # ---- External services ----
     qdrant_url: str = "http://qdrant:6333"
+    qdrant_api_key: str = ""
     ollama_url: str = "http://host.docker.internal:11434"
     frontend_origin: str = "http://localhost:5173"
 
