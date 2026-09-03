@@ -15,7 +15,7 @@ from utils.rate_limit import auth_rate_limit
 router = APIRouter(tags=["auth"])
 
 _REFRESH_COOKIE = "sovereign_refresh"
-_COOKIE_OPTS = dict(httponly=True, samesite="strict", secure=False)  # set secure=True behind TLS
+_COOKIE_OPTS = dict(httponly=True, samesite="none", secure=True)
 
 
 # ------------------------------------------------------------------
