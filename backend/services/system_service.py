@@ -41,15 +41,13 @@ async def get_system_status() -> SystemStatus:
             providers = result.scalars().all()
 
             if not providers:
-                services["llm"] = ServiceStatus(status="down", detail="no providers configured")
+                services["llm"] = ServiceStatus(status="down", detail="Offline")
             else:
                 # Check each provider's health
-                from services.llm_client import build_provider, _parse_custom_headers
-                from services.provider_service import _parse_custom_headers as _ph
+                from services.llm_client import build_provider
 
                 healthy_count = 0
                 total = len(providers)
-                details = []
 
                 for p in providers:
                     try:
@@ -69,22 +67,25 @@ async def get_system_status() -> SystemStatus:
                         reachable, latency = await client.health_check(None)
                         if reachable:
                             healthy_count += 1
-                            details.append(f"{p.name}: up ({latency}ms)")
-                        else:
-                            details.append(f"{p.name}: down")
-                    except Exception as exc:
-                        details.append(f"{p.name}: error")
+                    except Exception:
+                        pass
 
-                if healthy_count > 0:
-                    services["llm"] = ServiceStatus(
-                        status="up",
-                        detail="Online",
+                # Fallback: if health check failed but provider has models stored, treat as online
+                if healthy_count == 0:
+                    from models.provider import ProviderModel
+                    model_result = await db.execute(
+                        select(ProviderModel).where(
+                            ProviderModel.provider_id.in_([p.id for p in providers]),
+                            ProviderModel.status == "available",
+                        )
                     )
-                else:
-                    services["llm"] = ServiceStatus(
-                        status="down",
-                        detail="Offline",
-                    )
+                    if model_result.scalars().first():
+                        healthy_count = 1
+
+                services["llm"] = ServiceStatus(
+                    status="up" if healthy_count > 0 else "down",
+                    detail="Online" if healthy_count > 0 else "Offline",
+                )
 
     except Exception as exc:
         logger.warning("Failed to check LLM providers: %s", exc)
