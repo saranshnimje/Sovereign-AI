@@ -190,9 +190,9 @@ export default function AppShell() {
                 <div className="mt-2 space-y-1">
                   {Object.entries(status.services).map(([name, svc]) => (
                     <div key={name} className="flex items-center justify-between">
-                      <span className="text-[9px] text-neutral-500 capitalize">{name}</span>
+                      <span className="text-[9px] text-neutral-500 capitalize">{name === 'llm' ? 'LLM' : name}</span>
                       <span className={`text-[9px] ${svc.status === 'up' ? 'text-success-500' : 'text-danger-500'}`}>
-                        {svc.status === 'up' ? 'Online' : 'Offline'}
+                        {svc.status === 'up' ? (svc.detail || 'Online') : 'Offline'}
                       </span>
                     </div>
                   ))}

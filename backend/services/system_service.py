@@ -1,10 +1,12 @@
 """System status and resource metrics service."""
+import json
 import logging
 import time
 from functools import lru_cache
 
 import httpx
 import psutil
+from sqlalchemy import select
 
 from config import get_settings
 from schemas.system import ResourceMetrics, ServiceStatus, SystemStatus
@@ -27,20 +29,66 @@ async def get_system_status() -> SystemStatus:
     settings = get_settings()
     services: dict[str, ServiceStatus] = {}
 
-    # --- Ollama health ---
-    if settings.ollama_url:
-        try:
-            t0 = time.monotonic()
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(settings.ollama_url + "/")
-            latency = int((time.monotonic() - t0) * 1000)
-            services["ollama"] = ServiceStatus(
-                status="up" if resp.status_code < 500 else "down", latency_ms=latency
+    # --- Check actual configured LLM providers ---
+    try:
+        from database import async_session_factory
+        from models.provider import LLMProvider
+
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(LLMProvider).where(LLMProvider.enabled == True)  # noqa: E712
             )
-        except Exception as exc:
-            services["ollama"] = ServiceStatus(status="down", detail=str(exc)[:120])
-    else:
-        services["ollama"] = ServiceStatus(status="down", detail="not configured")
+            providers = result.scalars().all()
+
+            if not providers:
+                services["llm"] = ServiceStatus(status="down", detail="no providers configured")
+            else:
+                # Check each provider's health
+                from services.llm_client import build_provider, _parse_custom_headers
+                from services.provider_service import _parse_custom_headers as _ph
+
+                healthy_count = 0
+                total = len(providers)
+                details = []
+
+                for p in providers:
+                    try:
+                        custom_h = None
+                        if p.custom_headers:
+                            try:
+                                custom_h = json.loads(p.custom_headers) if isinstance(p.custom_headers, str) else p.custom_headers
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+
+                        client = build_provider(
+                            provider_type=p.provider_type,
+                            base_url=p.base_url,
+                            api_key=p.api_key,
+                            custom_headers=custom_h,
+                        )
+                        reachable, latency = await client.health_check(None)
+                        if reachable:
+                            healthy_count += 1
+                            details.append(f"{p.name}: up ({latency}ms)")
+                        else:
+                            details.append(f"{p.name}: down")
+                    except Exception as exc:
+                        details.append(f"{p.name}: error")
+
+                if healthy_count > 0:
+                    services["llm"] = ServiceStatus(
+                        status="up",
+                        detail=f"{healthy_count}/{total} providers online",
+                    )
+                else:
+                    services["llm"] = ServiceStatus(
+                        status="down",
+                        detail=f"0/{total} providers online",
+                    )
+
+    except Exception as exc:
+        logger.warning("Failed to check LLM providers: %s", exc)
+        services["llm"] = ServiceStatus(status="down", detail=str(exc)[:120])
 
     # --- Qdrant health ---
     try:
@@ -65,13 +113,6 @@ async def get_system_status() -> SystemStatus:
 
     # --- Loaded models (currently running in memory) ---
     models_loaded: list[str] = []
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(settings.ollama_url + "/api/ps")
-        if resp.status_code == 200:
-            models_loaded = [m["name"] for m in resp.json().get("models", [])]
-    except Exception:
-        pass
 
     # Determine overall health
     down_count = sum(1 for s in services.values() if s.status == "down")
