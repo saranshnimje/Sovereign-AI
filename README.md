@@ -2,6 +2,10 @@
 
 **Secure, self-hosted AI workbench for private and sovereign AI workloads.**
 
+[![Live Demo](https://img.shields.io/badge/Live_Demo-sovereign--ai--igkz.vercel.app-00C853?style=for-the-badge&logo=vercel&logoColor=white)](https://sovereign-ai-igkz.vercel.app)
+[![Backend API](https://img.shields.io/badge/Backend_API-Render-4D0082?style=for-the-badge&logo=render&logoColor=white)](https://sovereign-ai-backend-ciy8.onrender.com)
+[![GitHub](https://img.shields.io/badge/GitHub-saranshnimje/Sovereign--AI-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/saranshnimje/Sovereign-AI)
+
 Sovereign AI is a self-hosted AI workbench designed for organizations that need control over their own AI infrastructure and sensitive data. It combines local LLM inference (Ollama), a retrieval-augmented knowledge base backed by a local vector database, a permissioned tool/agent system with human-in-the-loop approvals, role-based access control, and a tamper-evident audit log — all deployable as a single Docker Compose stack on your own hardware. Documents, embeddings, conversations, and inference stay inside your network; external cloud AI providers can be connected optionally, but are never required for core functionality.
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
@@ -555,6 +559,28 @@ Until then, [`docs/DEMO_GUIDE.md`](docs/DEMO_GUIDE.md) provides a scripted 5-min
 
 ## 26. Deployment Scenarios
 
+### Cloud (Live Demo)
+
+The project is deployed and accessible online:
+
+| Component | URL | Platform |
+|---|---|---|
+| **Frontend** | [sovereign-ai-igkz.vercel.app](https://sovereign-ai-igkz.vercel.app) | Vercel (free tier) |
+| **Backend API** | [sovereign-ai-backend-ciy8.onrender.com](https://sovereign-ai-backend-ciy8.onrender.com) | Render (free tier) |
+| **Database** | Neon PostgreSQL (DE Frankfurt) | Neon (free tier) |
+| **Vector DB** | Qdrant Cloud (DE Frankfurt) | Qdrant Cloud (free tier) |
+
+**Cloud setup details:**
+- Frontend: React SPA deployed via `vercel.json` with SPA rewrites; `VITE_API_URL` env var points to the Render backend
+- Backend: FastAPI on Render with `render.yaml`; uses PostgreSQL via `DATABASE_URL` env var (SQLite fallback for local dev)
+- Qdrant: Cloud cluster with API key passed via `QDRANT_API_KEY` env var
+- Authentication: JWT with httpOnly refresh cookies (`SameSite=None; Secure` for cross-origin)
+- LLM Providers: Connect OpenRouter, OpenCode Zen (7 free models), or any OpenAI-compatible endpoint via the Providers page
+
+**Login:** Register the first account — it automatically becomes admin. Default chat model: `openrouter/free` (requires OpenRouter API key with credits) or use OpenCode Zen free models.
+
+### Self-Hosted (Docker)
+
 Potential use cases enabled by the architecture (deployment models, not claims of existing production installs):
 
 - **Enterprise private infrastructure** — internal knowledge assistants over contracts/policies without external processing
@@ -562,6 +588,25 @@ Potential use cases enabled by the architecture (deployment models, not claims o
 - **Research institutions** — corpus-grounded Q&A over unpublished papers and datasets
 - **Sensitive internal knowledge systems** — HR/legal/finance helpdesks grounded in confidential documents
 - **Offline / connectivity-constrained sites** — field or secured facilities operating after one-time provisioning
+
+### Local Development
+
+```bash
+git clone https://github.com/saranshnimje/Sovereign-AI.git
+cd Sovereign-AI
+
+# Backend
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload          # http://localhost:8000/api/docs
+
+# Frontend (new terminal)
+cd frontend
+npm install
+npm run dev                        # http://localhost:5173
+```
+
+Requires: Python 3.11, Node.js 20, Ollama running locally with `llama3.2:3b` and `nomic-embed-text` models pulled.
 
 Suitability always depends on the organization's own compliance assessment.
 
