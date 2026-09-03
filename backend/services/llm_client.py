@@ -186,11 +186,8 @@ class OllamaProvider(BaseLLMProvider):
         )
 
     async def list_models(self) -> list[dict]:
-        try:
-            resp = await self._retry(lambda: self._get_client().get("/api/tags"))
-            return resp.json().get("models", [])
-        except ModelUnavailableError:
-            return []
+        resp = await self._retry(lambda: self._get_client().get("/api/tags"))
+        return resp.json().get("models", [])
 
     async def health_check(self, model: str | None = None) -> tuple[bool, int | None]:
         import time
@@ -376,14 +373,11 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             return False, None
 
     async def list_models(self) -> list[dict]:
-        try:
-            resp = await self._get_client().get(
-                f"{self._api_root()}/models", headers=self._build_headers(), timeout=5.0
-            )
-            resp.raise_for_status()
-            return resp.json().get("data", [])
-        except Exception:
-            return []
+        resp = await self._get_client().get(
+            f"{self._api_root()}/models", headers=self._build_headers(), timeout=5.0
+        )
+        resp.raise_for_status()
+        return resp.json().get("data", [])
 
     async def verify_auth(self, model: str | None = None) -> tuple[bool | None, str | None]:
         if not self._api_key or not model:
@@ -911,8 +905,6 @@ class CohereProvider(BaseLLMProvider):
             # Cohere v2 returns {"models": [...]} or {"data": [...]}
             models = data.get("models") or data.get("data", [])
             return [{"id": m.get("id", m.get("name", "")), **m} if isinstance(m, dict) else {"id": m} for m in models]
-        except Exception:
-            return []
 
     async def verify_auth(self, model: str | None = None) -> tuple[bool | None, str | None]:
         if not self._api_key or not model:
@@ -965,9 +957,13 @@ def build_provider(
         PROVIDER_bedrock, PROVIDER_OLLAMA_COMPATIBLE,
     )
 
-    if provider_type in (PROVIDER_OLLAMA, PROVIDER_OLLAMA_COMPATIBLE):
+    if provider_type == PROVIDER_OLLAMA:
         url = base_url or "http://host.docker.internal:11434"
         return OllamaProvider(url)
+
+    if provider_type == PROVIDER_OLLAMA_COMPATIBLE:
+        url = base_url or "http://host.docker.internal:11434"
+        return OpenAICompatibleProvider(url, api_key=api_key, timeout=timeout, custom_headers=custom_headers)
 
     if provider_type == PROVIDER_OPENAI:
         url = base_url or "https://api.openai.com"
