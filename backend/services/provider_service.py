@@ -349,10 +349,6 @@ class ProviderService:
                 api_key=p.api_key,
                 custom_headers=_parse_custom_headers(p.custom_headers),
             )
-            # Adapter list_models() implementations are intentionally lenient
-            # (used by dashboards) and may swallow connection errors as [].
-            # Discovery must be strict: verify reachability first so an
-            # unreachable provider surfaces as an error instead of "no models".
             reachable, _latency = await client.health_check(None)
             if not reachable:
                 raise HTTPException(
@@ -360,6 +356,7 @@ class ProviderService:
                     "Connection failed — provider is unreachable",
                 )
             raw = await client.list_models()
+            logger.info("discover_models: provider=%s raw_count=%d", provider_id, len(raw or []))
         except HTTPException:
             raise
         except ModelUnavailableError as exc:
@@ -398,6 +395,7 @@ class ProviderService:
                 status="available",
             )
             results.append(dm)
+        logger.info("discover_models: provider=%s parsed_count=%d names=%s", provider_id, len(results), [r.name for r in results])
         return results
 
     # ------------------------------------------------------------------
@@ -461,6 +459,7 @@ class ProviderService:
         - Returns the refreshed catalog.
         """
         discovered = await self.discover_models(provider_id)
+        logger.info("refresh_models: discovered %d models for provider %s", len(discovered), provider_id)
         now = datetime.now(timezone.utc)
 
         result = await self.db.execute(
