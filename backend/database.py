@@ -39,19 +39,24 @@ class UTCDateTime(TypeDecorator):
 
 settings = get_settings()
 
-_is_postgres = settings.database_url.startswith("postgresql")
+# Normalize PostgreSQL URL to use asyncpg driver
+_db_url = settings.database_url
+if _db_url.startswith("postgresql://"):
+    _db_url = _db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+_is_postgres = _db_url.startswith("postgresql")
 
 
 if _is_postgres:
     engine = create_async_engine(
-        settings.database_url,
+        _db_url,
         echo=False,
         pool_pre_ping=True,
     )
 else:
     from sqlalchemy.pool import StaticPool
     engine = create_async_engine(
-        settings.database_url,
+        _db_url,
         echo=False,
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
