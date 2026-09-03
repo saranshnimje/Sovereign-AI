@@ -27,10 +27,15 @@ class UTCDateTime(TypeDecorator):
     tzinfo=UTC on read so Pydantic serializes them with '+00:00' suffix,
     making the API contract explicitly timezone-aware.
 
-    Existing data (already stored as UTC) requires no migration.
+    On write: strips tzinfo so PostgreSQL TIMESTAMP WITHOUT TIME ZONE works.
     """
     impl = DateTime
     cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None and value.tzinfo is not None:
+            return value.replace(tzinfo=None)
+        return value
 
     def process_result_value(self, value, dialect):
         if value is not None and value.tzinfo is None:
