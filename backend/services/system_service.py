@@ -31,7 +31,7 @@ async def get_system_status() -> SystemStatus:
 
     # --- Check actual configured LLM providers ---
     try:
-        from database import async_session_factory
+        from database import AsyncSessionLocal
         from models.provider import LLMProvider
 
         async with async_session_factory() as db:
