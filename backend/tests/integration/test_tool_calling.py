@@ -16,6 +16,19 @@ DIM = 768
 FAKE_VECTORS = lambda n: [[0.1] * DIM for _ in range(n)]
 
 
+def _make_understand_resp(intent="task", goal="test", needs_plan=True, needs_tools=True, needs_verification=True):
+    r = MagicMock()
+    r.content = json.dumps({
+        "intent": intent,
+        "goal": goal,
+        "needs_plan": needs_plan,
+        "needs_tools": needs_tools,
+        "needs_verification": needs_verification,
+        "reasoning": "test",
+    })
+    return r
+
+
 def _make_plan_resp(goal="test", steps=None):
     """Create a planner response in the new format."""
     r = MagicMock()
@@ -108,6 +121,7 @@ class TestToolCalling:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("What is 2+2?"),
                 _make_reasoner_resp("CONTINUE", "need calculator", "calculator", {"expression": "2+2"}, "math"),
                 _make_reasoner_resp("COMPLETE", "The answer is 4."),
@@ -125,7 +139,6 @@ class TestToolCalling:
             assert "event: observation" in body
             assert "event: token" in body
             assert "event: done" in body
-            # Verify call_id is present
             assert '"call_id"' in body
 
     @pytest.mark.asyncio
@@ -148,6 +161,7 @@ class TestToolCalling:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("Use nonexistent tool"),
                 _make_reasoner_resp("CONTINUE", "use tool", "nonexistent_tool", {}, "test"),
                 _make_reasoner_resp("COMPLETE", "Tool not available, answering directly."),
@@ -160,7 +174,6 @@ class TestToolCalling:
             )
             assert resp.status_code == 200
             body = resp.text
-            # Unknown tool returns tool_result with error
             assert "event: tool_result" in body
             assert "not found" in body.lower() or "not available" in body.lower()
 
@@ -184,6 +197,7 @@ class TestToolCalling:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("Calculate with bad args"),
                 _make_reasoner_resp("CONTINUE", "use calculator", "calculator", {"wrong": "field"}, "test"),
                 _make_reasoner_resp("COMPLETE", "Invalid input, answering directly."),
@@ -196,7 +210,6 @@ class TestToolCalling:
             )
             assert resp.status_code == 200
             body = resp.text
-            # Invalid input returns tool_result with error
             assert "event: tool_result" in body
             assert '"status": "failed"' in body
 
@@ -230,6 +243,7 @@ class TestToolCalling:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("Search KB"),
                 _make_reasoner_resp("CONTINUE", "search kb", "search_kb", {"kb_id": "x", "query": "test"}, "search"),
                 _make_reasoner_resp("COMPLETE", "Permission denied, answering directly."),
@@ -268,6 +282,7 @@ class TestToolCalling:
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat, \
              patch("services.approval_service.ApprovalService.wait_for_decision", new_callable=AsyncMock, side_effect=mock_approval):
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("Run Python code"),
                 _make_reasoner_resp("CONTINUE", "run code", "python_exec", {"code": "print(1)"}, "run code"),
                 _make_reasoner_resp("COMPLETE", "High risk tool blocked."),
@@ -514,6 +529,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "use calculator", "calculator", {"expression": "1+1"}, "test"),
                 _make_reasoner_resp("COMPLETE", "2"),
@@ -577,6 +593,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "use calculator", "calculator", {"expression": "1+1"}, "test"),
                 _make_reasoner_resp("COMPLETE", "2"),
@@ -626,6 +643,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "use calculator", "calculator", {"expression": "1+1"}, "test"),
                 _make_reasoner_resp("COMPLETE", "2"),
@@ -661,6 +679,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "use calculator", "calculator", {"expression": "1+1"}, "test"),
                 _make_reasoner_resp("COMPLETE", "2"),
@@ -699,6 +718,7 @@ class TestToolExposure:
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat, \
              patch("services.approval_service.ApprovalService.wait_for_decision", new_callable=AsyncMock, side_effect=mock_approval):
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("Run code"),
                 _make_reasoner_resp("CONTINUE", "run code", "python_exec", {"code": "print(1)"}, "test"),
                 _make_reasoner_resp("COMPLETE", "High risk blocked."),
@@ -735,6 +755,7 @@ class TestToolExposure:
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat, \
              patch("services.approval_service.ApprovalService.wait_for_decision", new_callable=AsyncMock, side_effect=mock_approval):
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("Search web"),
                 _make_reasoner_resp("CONTINUE", "search web", "web_search", {"query": "test"}, "test"),
                 _make_reasoner_resp("COMPLETE", "Web search blocked."),
@@ -768,6 +789,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "investigate", "incident_investigate", {"incident_id": "1"}, "test"),
                 _make_reasoner_resp("COMPLETE", "Investigation started."),
@@ -811,6 +833,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "write file", "file_write", {"path": "test.txt", "content": "hi"}, "test"),
                 _make_reasoner_resp("COMPLETE", "Permission denied."),
@@ -845,6 +868,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "check status", "system_status", {}, "check status"),
                 _make_reasoner_resp("COMPLETE", "System is running."),
@@ -884,7 +908,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             # Provide enough responses for MAX_ITERATIONS iterations + safety
-            mock_chat.side_effect = [_make_plan_resp("Loop forever")] + [infinite_continue] * 60
+            mock_chat.side_effect = [_make_understand_resp(intent="task"), _make_plan_resp("Loop forever")] + [infinite_continue] * 60
             resp = await client.post(
                 f"/api/v1/chat/conversations/{conv_id}/agent",
                 json={"content": "Loop forever", "model_name": "llama3.2:3b"},
@@ -914,6 +938,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "step1", "calculator", {"expression": "2+2"}, "step1"),
                 _make_reasoner_resp("CONTINUE", "step2", "calculator", {"expression": "4+4"}, "step2"),
@@ -951,6 +976,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "read file", "file_read", {"path": "nonexistent.txt"}, "test"),
                 _make_reasoner_resp("COMPLETE", "File not found, answering directly."),
@@ -987,6 +1013,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("COMPLETE", "Safe answer."),
                 _make_verifier_resp(True),
@@ -1026,6 +1053,7 @@ class TestToolExposure:
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat, \
              patch("services.audit_service.AuditService.log", new_callable=AsyncMock, side_effect=mock_log):
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "calculate", "calculator", {"expression": "5+5"}, "test"),
                 _make_reasoner_resp("COMPLETE", "10"),
@@ -1060,6 +1088,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("COMPLETE", "No tools needed."),
                 _make_verifier_resp(True),
@@ -1149,6 +1178,7 @@ class TestToolExposure:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "delete file", "file_delete", {"path": "test.txt"}, "test"),
                 _make_reasoner_resp("COMPLETE", "Blocked."),
@@ -1188,6 +1218,7 @@ class TestInputNormalization:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "check status", "system_status", {}, "check"),
                 _make_reasoner_resp("COMPLETE", "Done."),
@@ -1224,6 +1255,7 @@ class TestInputNormalization:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "check status", "system_status", {}, "check"),
                 _make_reasoner_resp("COMPLETE", "Done."),
@@ -1260,6 +1292,7 @@ class TestInputNormalization:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "check status", "system_status", {}, "check"),
                 _make_reasoner_resp("COMPLETE", "Done."),
@@ -1294,6 +1327,7 @@ class TestInputNormalization:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "math", "calculator", {"expression": "2+2"}, "math"),
                 _make_reasoner_resp("COMPLETE", "4"),
@@ -1329,6 +1363,7 @@ class TestInputNormalization:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "bad calc", "calculator", {"wrong": "field"}, "test"),
                 _make_reasoner_resp("COMPLETE", "Invalid."),
@@ -1363,6 +1398,7 @@ class TestInputNormalization:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "check status", "system_status", {}, "test"),
                 _make_reasoner_resp("COMPLETE", "Done."),
@@ -1398,6 +1434,7 @@ class TestInputNormalization:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
+                _make_understand_resp(intent="task"),
                 _make_plan_resp("test"),
                 _make_reasoner_resp("CONTINUE", "check status", "system_status", {"foo": "bar", "unexpected": 42}, "test"),
                 _make_reasoner_resp("COMPLETE", "Done."),

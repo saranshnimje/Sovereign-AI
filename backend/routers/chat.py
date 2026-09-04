@@ -299,6 +299,7 @@ async def send_agent_message(
     """
     body = data.model_dump()
     tool_mode = (body.get("tool_mode") or "auto")
+    agent_mode = (body.get("agent_mode") or "agent")
     manual_tools = body.get("tools") or []
 
     # Use injected db for initial lookups (conversation, provider)
@@ -374,8 +375,8 @@ async def send_agent_message(
     async def _gen():
         nonlocal tool_names
 
-        logger.info("Agent generator started: conv=%s model=%s provider_id=%s tool_mode=%s",
-                     conv_id, data.model_name, data.provider_id, tool_mode)
+        logger.info("Agent generator started: conv=%s model=%s provider_id=%s tool_mode=%s agent_mode=%s",
+                     conv_id, data.model_name, data.provider_id, tool_mode, agent_mode)
 
         full_content = ""
         async for event_str in runtime.run(
@@ -389,6 +390,7 @@ async def send_agent_message(
             tool_descriptions=tool_descriptions,
             conversation_id=conv_id,
             agent_state=agent,
+            agent_mode=agent_mode,
         ):
             # Pass through runtime events
             yield event_str

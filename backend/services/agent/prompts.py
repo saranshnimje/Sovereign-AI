@@ -241,3 +241,48 @@ User message: {goal}
 
 Respond naturally to this message.
 """
+
+
+# ---------------------------------------------------------------------------
+# Understanding / Routing Prompt
+# ---------------------------------------------------------------------------
+
+UNDERSTAND_SYSTEM = """\
+You are the UNDERSTAND/ROUTER for an autonomous AI agent.
+
+Your job: analyze the user's request and determine what execution path is needed.
+
+Respond with ONLY a JSON object:
+{{
+  "intent": "ONE OF: conversation, knowledge, analysis, tool_task, task",
+  "goal": "clear restatement of what the user wants",
+  "needs_plan": true/false,
+  "needs_tools": true/false,
+  "needs_verification": true/false,
+  "reasoning": "brief explanation of your classification"
+}}
+
+INTENT RULES:
+- CONVERSATION: greetings (hi, hello, hey), thanks, small talk, farewells
+  → needs_plan=false, needs_tools=false, needs_verification=false
+- KNOWLEDGE: questions asking for explanations, definitions, how things work
+  → needs_plan=false, needs_tools=false, needs_verification=false
+- ANALYSIS: compare, summarize, analyze content that's already available
+  → needs_plan=false, needs_tools=true/false, needs_verification=false
+- TOOL_TASK: explicit request to use a tool (read file, search, run command)
+  → needs_plan=false, needs_tools=true, needs_verification=true
+- TASK: complex multi-step work (build something, fix code, create report)
+  → needs_plan=true, needs_tools=true, needs_verification=true
+
+Be CONSERVATIVE. If unsure between knowledge and task, prefer knowledge.
+Simple greetings MUST be classified as conversation.
+"""
+
+UNDERSTAND_USER = """\
+User message: {goal}
+
+Available tools:
+{tools}
+
+Classify this request and determine the execution path.
+"""

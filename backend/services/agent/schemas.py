@@ -8,11 +8,36 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from enum import Enum
 from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
 
 T = TypeVar("T")
+
+
+# ---------------------------------------------------------------------------
+# Request Intent (Understanding Stage)
+# ---------------------------------------------------------------------------
+
+class RequestIntent(str, Enum):
+    """Classification of user request intent."""
+    CONVERSATION = "conversation"   # Greetings, thanks, small talk
+    KNOWLEDGE = "knowledge"         # Questions, explanations, definitions
+    ANALYSIS = "analysis"           # Compare, summarize, analyze content
+    TOOL_TASK = "tool_task"         # Explicit tool request (read file, search KB)
+    TASK = "task"                   # Complex multi-step task
+
+
+class UnderstandingResult(BaseModel):
+    """Output of the UNDERSTAND/ROUTE stage."""
+    intent: RequestIntent
+    goal: str
+    needs_plan: bool = False
+    needs_tools: bool = False
+    needs_verification: bool = False
+    confidence: float = 1.0
+    reasoning: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -59,9 +84,10 @@ class ToolAction(BaseModel):
 # ---------------------------------------------------------------------------
 
 class AgentDecision(BaseModel):
-    decision: Literal["CONTINUE", "RETRY", "REPLAN", "VERIFY", "COMPLETE", "ASK_USER", "FAIL"]
+    decision: Literal["CONTINUE", "RETRY", "REPLAN", "VERIFY", "COMPLETE", "ASK_USER", "FAIL", "ANSWER_DIRECTLY"]
     reason: str
     next_action: ToolAction | None = None
+    answer: str | None = None
 
 
 # ---------------------------------------------------------------------------

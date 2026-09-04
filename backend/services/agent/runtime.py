@@ -37,6 +37,8 @@ from services.agent.prompts import (
     REPLANNER_USER,
     SIMPLE_REQUEST_SYSTEM,
     SIMPLE_REQUEST_USER,
+    UNDERSTAND_SYSTEM,
+    UNDERSTAND_USER,
     VERIFIER_SYSTEM,
     VERIFIER_USER,
 )
@@ -45,6 +47,8 @@ from services.agent.schemas import (
     Observation,
     Plan,
     PlanStep,
+    RequestIntent,
+    UnderstandingResult,
     VerificationCriteriaResult,
     VerificationResult,
     parse_llm_json,
@@ -69,12 +73,12 @@ AGENT_MAX_RUNTIME_SECONDS = int(os.environ.get("AGENT_MAX_RUNTIME_SECONDS", "300
 
 # Simple request patterns that don't need planning
 _SIMPLE_REQUEST_PATTERNS = [
-    r"^\s*(hi|hello|hey|howdy|greetings)\s*(there)?\s*[!.]*\s*$",
+    r"^\s*(hi+|hello|hey|howdy|greetings)\s*(there)?\s*[!.]*\s*$",
     r"^\s*(good\s+(morning|afternoon|evening|day))\s*[!.]*\s*$",
     r"^\s*(thanks|thank\s*you|thx|ty)\s*[!.]*\s*$",
     r"^\s*(how\s+are\s+you|how\s+are\s+things|hru)\s*[?!]*\s*$",
     r"^\s*(what'?s\s+up|sup|yo)\s*[?!]*\s*$",
-    r"^\s*(bye|goodbye|see\s+ya|later|cya)\s*[!.]*\s*$",
+    r"^\s*(bye+|goodbye|see\s+ya|later|cya)\s*[!.]*\s*$",
     r"^\s*(ok|okay|k|sure|alright|cool|nice|great|awesome)\s*[!.]*\s*$",
     r"^\s*(help|what\s+can\s+you\s+do)\s*[?!]*\s*$",
     r"^\s*(who\s+are\s+you|what\s+are\s+you)\s*[?!]*\s*$",
@@ -188,6 +192,694 @@ class AgentRuntime:
                 return True
         return False
 
+    async def _understand(
+        self, *, llm: Any, model: str, goal: str, tool_descriptions: str,
+    ) -> UnderstandingResult:
+        """Classify user intent and determine execution path.
+
+        Uses deterministic rules for obvious cases, LLM for ambiguous ones.
+        """
+        stripped = goal.strip()
+
+        # --- Deterministic fast path for obvious greetings ---
+        if self._is_simple_request(stripped):
+            return UnderstandingResult(
+                intent=RequestIntent.CONVERSATION,
+                goal=f"Respond naturally to: {stripped}",
+                needs_plan=False,
+                needs_tools=False,
+                needs_verification=False,
+                confidence=1.0,
+                reasoning="Simple greeting/small talk detected by pattern match",
+            )
+
+        # --- LLM-based understanding for everything else ---
+        system = UNDERSTAND_SYSTEM
+        user = UNDERSTAND_USER.format(goal=stripped, tools=tool_descriptions or "No tools available")
+
+        try:
+            resp = await asyncio.wait_for(
+                llm.chat(
+                    model=model,
+                    messages=[
+                        ChatMessage(role="system", content=system),
+                        ChatMessage(role="user", content=user),
+                    ],
+                    stream=False,
+                    temperature=0.0,
+                    max_tokens=512,
+                ),
+                timeout=30.0,  # Understanding must be fast
+            )
+            text = resp.content if hasattr(resp, "content") else str(resp)
+        except (asyncio.TimeoutError, ModelUnavailableError, Exception) as exc:
+            logger.warning("Understanding failed, defaulting to TASK: %s", exc)
+            # Conservative fallback: treat as task (will create plan)
+            return UnderstandingResult(
+                intent=RequestIntent.TASK,
+                goal=stripped,
+                needs_plan=True,
+                needs_tools=True,
+                needs_verification=True,
+                confidence=0.0,
+                reasoning=f"Understanding LLM failed: {exc}",
+            )
+
+        data = parse_llm_json(text)
+        if data.get("type") == "error":
+            logger.warning("Understanding output unparseable: %s", text[:300])
+            # Fallback: classify based on heuristics
+            return self._heuristic_classify(stripped)
+
+        try:
+            result = UnderstandingResult.model_validate(data)
+            # Override: CONVERSATION never needs plan/tools/verification
+            if result.intent == RequestIntent.CONVERSATION:
+                result.needs_plan = False
+                result.needs_tools = False
+                result.needs_verification = False
+            # Override: KNOWLEDGE never needs plan
+            elif result.intent == RequestIntent.KNOWLEDGE:
+                result.needs_plan = False
+                result.needs_verification = False
+            # Override: ANALYSIS never needs plan
+            elif result.intent == RequestIntent.ANALYSIS:
+                result.needs_plan = False
+            return result
+        except Exception:
+            logger.warning("Understanding schema invalid: %s", data)
+            return self._heuristic_classify(stripped)
+
+    @staticmethod
+    def _heuristic_classify(goal: str) -> UnderstandingResult:
+        """Fallback heuristic classification when LLM understanding fails."""
+        lower = goal.lower().strip()
+
+        # Knowledge questions
+        knowledge_patterns = [
+            r"^what\s+(is|are|was|were)\b",
+            r"^how\s+(do|does|did|can|could|would|should)\b",
+            r"^why\s+(do|does|did|is|are)\b",
+            r"^explain\b",
+            r"^define\b",
+            r"^tell\s+me\s+about\b",
+        ]
+        for p in knowledge_patterns:
+            if re.match(p, lower):
+                return UnderstandingResult(
+                    intent=RequestIntent.KNOWLEDGE,
+                    goal=goal,
+                    needs_plan=False,
+                    needs_tools=False,
+                    needs_verification=False,
+                    confidence=0.7,
+                    reasoning="Heuristic: knowledge question pattern",
+                )
+
+        # Tool tasks
+        tool_patterns = [
+            r"^read\b",
+            r"^search\b",
+            r"^find\b",
+            r"^run\b",
+            r"^execute\b",
+            r"^open\b",
+        ]
+        for p in tool_patterns:
+            if re.match(p, lower):
+                return UnderstandingResult(
+                    intent=RequestIntent.TOOL_TASK,
+                    goal=goal,
+                    needs_plan=False,
+                    needs_tools=True,
+                    needs_verification=True,
+                    confidence=0.7,
+                    reasoning="Heuristic: tool task pattern",
+                )
+
+        # Default: treat as task
+        return UnderstandingResult(
+            intent=RequestIntent.TASK,
+            goal=goal,
+            needs_plan=True,
+            needs_tools=True,
+            needs_verification=True,
+            confidence=0.5,
+            reasoning="Heuristic fallback: treating as task",
+        )
+
+    # ------------------------------------------------------------------
+    # Intent-specific handlers
+    # ------------------------------------------------------------------
+
+    def _generate_conversation_response(self, goal: str) -> str:
+        """Generate a direct response for conversational requests."""
+        stripped = goal.strip().lower()
+        # Deterministic responses for common greetings
+        if any(w in stripped for w in ["hi", "hello", "hey", "howdy", "greetings"]):
+            return "Hello! How can I help you today?"
+        if any(w in stripped for w in ["thanks", "thank you", "thx", "ty"]):
+            return "You're welcome! Let me know if you need anything else."
+        if any(w in stripped for w in ["bye", "goodbye", "see you", "later"]):
+            return "Goodbye! Feel free to come back anytime."
+        if any(w in stripped for w in ["how are you", "how are things"]):
+            return "I'm doing well, thanks for asking! How can I assist you?"
+        if any(w in stripped for w in ["good morning", "good afternoon", "good evening"]):
+            return f"{goal.strip().split()[0].title()}! How can I help you?"
+        # Generic conversational response
+        return "I understand. How can I help you?"
+
+    async def _generate_knowledge_response(
+        self, *, llm: Any, model: str, goal: str,
+    ) -> str:
+        """Generate a direct knowledge response without tools."""
+        system = "You are a helpful AI assistant. Answer the user's question directly and concisely. Do NOT use any tools. Keep your response under 200 words."
+        user = f"Question: {goal}"
+
+        try:
+            resp = await asyncio.wait_for(
+                llm.chat(
+                    model=model,
+                    messages=[
+                        ChatMessage(role="system", content=system),
+                        ChatMessage(role="user", content=user),
+                    ],
+                    stream=False,
+                    temperature=0.3,
+                    max_tokens=1024,
+                ),
+                timeout=60.0,
+            )
+            return resp.content if hasattr(resp, "content") else str(resp)
+        except Exception as exc:
+            logger.warning("Knowledge response failed: %s", exc)
+            return f"I understand you're asking about: {goal}. I'm having trouble generating a response right now."
+
+    async def _handle_analysis_with_tools(
+        self, *, llm: Any, model: str, goal: str,
+        tool_names: list[str], tool_descriptions: str,
+        user_role: str, db: AsyncSession, user_id: str, reg: Any,
+        agent: AgentStateMachine,
+        observations: list[Observation], evidence: list[str],
+        tool_results_context: list[str], failed_attempts: list[dict],
+        start_time: float, _action_fingerprints: dict[str, int],
+    ) -> str:
+        """Handle analysis requests that may need tools but no multi-step plan."""
+        # Single-step: let reasoner pick one tool, execute, respond
+        decision = await self._decide(
+            llm=llm, model=model, goal=goal, agent=agent,
+            observations=observations, evidence=evidence,
+            failed_attempts=failed_attempts,
+            tool_results_context=tool_results_context,
+            tool_descriptions=tool_descriptions,
+        )
+
+        if decision.decision in ("CONTINUE", "RETRY") and decision.next_action:
+            action = decision.next_action
+            if action.tool in tool_names:
+                result = await self._execute_tool(
+                    tool_name=action.tool, tool_input=action.input,
+                    user_role=user_role, db=db, user_id=user_id, reg=reg,
+                )
+                passed, reason = _verify_tool_result(action.tool, result)
+                tool_results_context.append(f"{action.tool} → {reason[:200]}")
+                if passed:
+                    evidence.append(reason)
+
+        # Generate response with LLM
+        return await self._generate_knowledge_response(llm=llm, model=model, goal=goal)
+
+    async def _handle_tool_task(
+        self, *, llm: Any, model: str, goal: str,
+        tool_names: list[str], tool_descriptions: str,
+        user_role: str, db: AsyncSession, user_id: str, reg: Any,
+        agent: AgentStateMachine,
+        observations: list[Observation], evidence: list[str],
+        tool_results_context: list[str], failed_attempts: list[dict],
+        start_time: float, _action_fingerprints: dict[str, int],
+    ) -> str:
+        """Handle explicit tool task requests (single tool execution)."""
+        # Let reasoner pick the right tool
+        decision = await self._decide(
+            llm=llm, model=model, goal=goal, agent=agent,
+            observations=observations, evidence=evidence,
+            failed_attempts=failed_attempts,
+            tool_results_context=tool_results_context,
+            tool_descriptions=tool_descriptions,
+        )
+
+        if decision.decision in ("CONTINUE", "RETRY") and decision.next_action:
+            action = decision.next_action
+            if action.tool in tool_names:
+                result = await self._execute_tool(
+                    tool_name=action.tool, tool_input=action.input,
+                    user_role=user_role, db=db, user_id=user_id, reg=reg,
+                )
+                passed, reason = _verify_tool_result(action.tool, result)
+                tool_results_context.append(f"{action.tool} → {reason[:200]}")
+                if passed:
+                    evidence.append(reason)
+                    return f"Tool execution completed successfully.\n\nResult:\n{reason[:500]}"
+                else:
+                    return f"Tool execution failed: {reason[:500]}"
+            else:
+                return f"Tool '{action.tool}' is not available."
+        else:
+            return f"I understand you want to use a tool for: {goal}. Let me try to help."
+
+    async def _run_agent_loop(
+        self, *, llm: Any, model: str, goal: str,
+        agent: AgentStateMachine, plan: Plan | None, reg: Any,
+        tool_names: list[str], tool_descriptions: str,
+        user_role: str, db: AsyncSession, user_id: str,
+        observations: list[Observation], evidence: list[str],
+        failed_attempts: list[dict],
+        tool_results_context: list[str],
+        start_time: float, _action_fingerprints: dict[str, int],
+        _result: list[str],
+    ) -> AsyncGenerator[str, None]:
+        """Run the main agent loop for TASK intent. Yields SSE events."""
+        final_content = ""
+
+        for iteration in range(MAX_ITERATIONS):
+            # Check wall-clock timeout
+            elapsed = time.monotonic() - start_time
+            if elapsed > AGENT_MAX_RUNTIME_SECONDS:
+                agent.fail(
+                    f"Wall-clock timeout exceeded ({elapsed:.0f}s > {AGENT_MAX_RUNTIME_SECONDS}s)"
+                )
+                yield _sse("agent_state", agent.to_dict())
+                yield _sse("error", {
+                    "message": f"Wall-clock timeout: {AGENT_MAX_RUNTIME_SECONDS}s exceeded"
+                })
+                yield _sse("done", {
+                    "token_count": 0,
+                    "activity": agent.activity,
+                    "tool_calls": agent.tool_call_count,
+                    "state": agent.state.value,
+                    "elapsed_ms": agent.get_elapsed_ms(),
+                    "plan": [
+                        {"id": s.id, "description": s.description, "status": s.status}
+                        for s in agent.plan
+                    ],
+                    "observations": [],
+                    "verification": None,
+                })
+                _result[0] = final_content
+                return
+
+            # Check if already in terminal state
+            if agent.state in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
+                break
+
+            # Check safety limits
+            limit_error = agent.check_limits()
+            if limit_error:
+                agent.fail(limit_error)
+                yield _sse("agent_state", agent.to_dict())
+                yield _sse("error", {"message": limit_error})
+                yield _sse("done", {
+                    "token_count": 0,
+                    "activity": agent.activity,
+                    "tool_calls": agent.tool_call_count,
+                    "state": agent.state.value,
+                    "elapsed_ms": agent.get_elapsed_ms(),
+                    "plan": [
+                        {"id": s.id, "description": s.description, "status": s.status}
+                        for s in agent.plan
+                    ],
+                    "observations": [],
+                    "verification": None,
+                })
+                _result[0] = final_content
+                return
+
+            # --- REASON: Decide what to do next ---
+            decision = await self._decide(
+                llm=llm, model=model, goal=goal, agent=agent,
+                observations=observations, evidence=evidence,
+                failed_attempts=failed_attempts,
+                tool_results_context=tool_results_context,
+                tool_descriptions=tool_descriptions,
+            )
+
+            yield _sse("decision", {
+                "decision": decision.decision,
+                "reason": decision.reason,
+                "iteration": iteration,
+            })
+
+            # If agent was cancelled during _decide, break
+            if agent.state in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
+                break
+
+            match decision.decision:
+                case "COMPLETE":
+                    # MUST go through verifier
+                    yield _sse("verification_started", {"type": "output"})
+                    verification = await self._verify(
+                        llm=llm, model=model, goal=goal, agent=agent,
+                        evidence=evidence, tool_results_context=tool_results_context,
+                        observations=observations,
+                    )
+                    yield _sse("verification", verification.model_dump())
+
+                    if verification.verified:
+                        yield _sse("verification_passed", {
+                            "type": "output",
+                            "confidence": verification.confidence,
+                        })
+                        final_content = decision.reason or "Task completed successfully."
+                        agent.complete()
+                        yield _sse("agent_state", agent.to_dict())
+                        break
+                    else:
+                        yield _sse("verification_failed", {
+                            "type": "output",
+                            "missing": verification.missing,
+                        })
+                        # Verifier rejected — replan
+                        logger.info("Verifier rejected completion: %s", verification.missing)
+                        failed_attempts.append({
+                            "reason": "Completion rejected by verifier",
+                            "missing": verification.missing,
+                        })
+                        new_plan = await self._replan(
+                            llm=llm, model=model, goal=goal,
+                            acceptance_criteria=plan.acceptance_criteria if plan else [],
+                            failure_reason=f"Verification failed: {verification.missing}",
+                            failed_steps=[], evidence=evidence,
+                        )
+                        if new_plan:
+                            plan = new_plan
+                            agent.create_plan([
+                                {"description": s.description, "tool_name": s.tool}
+                                for s in plan.steps
+                            ])
+                            yield _sse("agent_state", agent.to_dict())
+                            yield _sse("plan_updated", {
+                                "reason": "Completion verification failed",
+                                "steps": [s.model_dump() for s in plan.steps],
+                            })
+                            agent.todo = type(agent.todo)()
+                            for s in plan.steps:
+                                agent.todo.add_task(s.description, tool_name=s.tool)
+                            yield _sse("todo_updated", agent.todo.to_dict())
+
+                case "VERIFY":
+                    yield _sse("verification_started", {"type": "output"})
+                    verification = await self._verify(
+                        llm=llm, model=model, goal=goal, agent=agent,
+                        evidence=evidence, tool_results_context=tool_results_context,
+                        observations=observations,
+                    )
+                    yield _sse("verification", verification.model_dump())
+
+                    if verification.verified:
+                        yield _sse("verification_passed", {
+                            "type": "output",
+                            "confidence": verification.confidence,
+                        })
+                        final_content = "Task completed and verified."
+                        agent.complete()
+                        yield _sse("agent_state", agent.to_dict())
+                        break
+                    else:
+                        yield _sse("verification_failed", {
+                            "type": "output",
+                            "missing": verification.missing,
+                        })
+
+                case "CONTINUE" | "RETRY":
+                    if decision.next_action is None:
+                        agent.fail("Reasoner returned CONTINUE/RETRY without next_action")
+                        yield _sse("agent_state", agent.to_dict())
+                        yield _sse("error", {"message": "No action provided"})
+                        _result[0] = final_content
+                        return
+
+                    action = decision.next_action
+
+                    # Skip tool if not in allowed list (tool_mode=none)
+                    if tool_names is not None and len(tool_names) == 0:
+                        logger.info("Tool %s skipped (tool_mode=none)", action.tool)
+                        continue
+
+                    # Enforce per-tool retry limit
+                    if not agent.can_retry(action.tool):
+                        logger.info("Tool %s exceeded retry limit, skipping", action.tool)
+                        failed_attempts.append({
+                            "tool": action.tool,
+                            "error": f"Exceeded max retries for {action.tool}",
+                            "failure_type": "INVALID_TOOL_ARGUMENTS",
+                        })
+                        continue
+
+                    # --- Loop detection via action fingerprinting ---
+                    fp = _fingerprint(action.tool, action.input)
+                    _action_fingerprints[fp] = _action_fingerprints.get(fp, 0) + 1
+                    if _action_fingerprints[fp] >= _LOOP_DETECTION_THRESHOLD:
+                        logger.warning(
+                            "Loop detected: fingerprint %s seen %d times",
+                            fp[:80], _action_fingerprints[fp],
+                        )
+                        failed_attempts.append({
+                            "tool": action.tool,
+                            "error": f"Loop detected: same action repeated {_action_fingerprints[fp]} times",
+                            "failure_type": "TOOL_ERROR",
+                        })
+                        new_plan = await self._replan(
+                            llm=llm, model=model, goal=goal,
+                            acceptance_criteria=plan.acceptance_criteria if plan else [],
+                            failure_reason=f"Loop detected: {action.tool} repeated {_action_fingerprints[fp]} times",
+                            failed_steps=[action.tool], evidence=evidence,
+                        )
+                        if new_plan:
+                            plan = new_plan
+                            agent.create_plan([
+                                {"description": s.description, "tool_name": s.tool}
+                                for s in plan.steps
+                            ])
+                            yield _sse("agent_state", agent.to_dict())
+                            yield _sse("plan_updated", {
+                                "reason": "Loop detected — replanning",
+                                "steps": [s.model_dump() for s in plan.steps],
+                            })
+                            agent.todo = type(agent.todo)()
+                            for s in plan.steps:
+                                agent.todo.add_task(s.description, tool_name=s.tool)
+                            yield _sse("todo_updated", agent.todo.to_dict())
+                        else:
+                            agent.fail(
+                                f"Loop detected: {action.tool} repeated "
+                                f"{_action_fingerprints[fp]} times, no alternative plan"
+                            )
+                            yield _sse("agent_state", agent.to_dict())
+                            yield _sse("error", {"message": "Loop detected, cannot recover"})
+                            yield _sse("done", {
+                                "token_count": 0,
+                                "activity": agent.activity,
+                                "tool_calls": agent.tool_call_count,
+                                "state": agent.state.value,
+                                "elapsed_ms": agent.get_elapsed_ms(),
+                                "plan": [
+                                    {"id": s.id, "description": s.description, "status": s.status}
+                                    for s in agent.plan
+                                ],
+                                "observations": [],
+                                "verification": None,
+                            })
+                            _result[0] = final_content
+                            return
+                        continue
+
+                    call_id = f"call_{iteration}_{action.tool}"
+
+                    # --- Start matching todo task ---
+                    for t in agent.todo.tasks:
+                        if (
+                            t.status == "pending"
+                            and t.description
+                            and action.tool
+                            and t.tool_name == action.tool
+                        ):
+                            agent.todo.start_task(t.id)
+                            break
+                    yield _sse("todo_updated", agent.todo.to_dict())
+
+                    # Execute tool
+                    agent.start_execution()
+                    agent.record_tool_call(action.tool, call_id, action.reasoning[:200])
+                    yield _sse("tool_call", {
+                        "call_id": call_id,
+                        "tool": action.tool,
+                        "input_summary": str(action.input)[:200],
+                        "reasoning": action.reasoning[:200],
+                    })
+
+                    result = await self._execute_tool(
+                        tool_name=action.tool, tool_input=action.input,
+                        user_role=user_role, db=db, user_id=user_id, reg=reg,
+                    )
+
+                    # Objective verification
+                    passed, reason = _verify_tool_result(action.tool, result)
+                    status = "success" if passed else "failed"
+                    duration_ms = result.get("duration_ms", 0)
+
+                    agent.record_tool_result(
+                        action.tool, call_id, status,
+                        reason[:200], duration_ms,
+                        error=reason if not passed else None,
+                    )
+                    yield _sse("tool_result", {
+                        "call_id": call_id,
+                        "tool": action.tool,
+                        "status": status,
+                        "result_summary": reason[:500],
+                        "duration_ms": duration_ms,
+                        "error": reason if not passed else None,
+                    })
+
+                    # --- Update matching todo task ---
+                    for t in agent.todo.tasks:
+                        if t.status == "active" and t.tool_name == action.tool:
+                            if passed:
+                                agent.todo.complete_task(t.id)
+                            else:
+                                agent.todo.fail_task(t.id, reason[:200])
+                            break
+                    yield _sse("todo_updated", agent.todo.to_dict())
+
+                    # Record observation
+                    obs = Observation(
+                        tool=action.tool, success=passed,
+                        exit_code=result.get("exit_code"),
+                        observation=reason,
+                        evidence=[reason] if passed else [],
+                        artifacts=self._extract_artifacts(action.tool, result),
+                        duration_ms=duration_ms,
+                        output_summary=str(result)[:500],
+                    )
+                    observations.append(obs)
+                    if passed:
+                        evidence.extend(obs.evidence)
+
+                    # Trim output for LLM context
+                    trimmed = self._trim_output(result)
+                    tool_results_context.append(
+                        f"Step {iteration+1}: {action.tool} → {status}\n"
+                        f"Output: {_json.dumps(trimmed)[:_MAX_OUTPUT_IN_CONTEXT]}"
+                    )
+
+                    # Observe
+                    from services.agent_state import Observation as _AgentObs
+                    agent_obs = _AgentObs(
+                        tool=action.tool,
+                        status="success" if passed else "error",
+                        facts=[reason[:100]],
+                        evidence_ids=[reason[:50]] if passed else [],
+                        duration_ms=duration_ms,
+                    )
+                    agent.observe(agent_obs)
+                    yield _sse("observation", {
+                        "tool": action.tool,
+                        "success": passed,
+                        "observation": reason[:300],
+                        "evidence": obs.evidence,
+                    })
+
+                    # Handle failure
+                    if not passed:
+                        failure_type = _classify_failure(action.tool, result, reason)
+                        failed_attempts.append({
+                            "tool": action.tool,
+                            "error": reason[:300],
+                            "failure_type": failure_type,
+                        })
+
+                        if failure_type == "FATAL":
+                            agent.fail(f"Fatal error: {reason[:200]}")
+                            yield _sse("agent_state", agent.to_dict())
+                            yield _sse("error", {"message": f"Fatal: {reason[:200]}"})
+                            _result[0] = final_content
+                            return
+
+                        if failure_type == "TRANSIENT" and agent.can_retry(action.tool):
+                            agent.record_retry(action.tool)
+                            yield _sse("retry", {
+                                "tool": action.tool,
+                                "attempt": agent.retries.get(action.tool, 0),
+                                "reason": reason[:200],
+                            })
+
+                case "REPLAN":
+                    new_plan = await self._replan(
+                        llm=llm, model=model, goal=goal,
+                        acceptance_criteria=plan.acceptance_criteria if plan else [],
+                        failure_reason=decision.reason,
+                        failed_steps=[a["tool"] for a in failed_attempts[-3:]],
+                        evidence=evidence,
+                    )
+                    if new_plan:
+                        plan = new_plan
+                        agent.create_plan([
+                            {"description": s.description, "tool_name": s.tool}
+                            for s in plan.steps
+                        ])
+                        yield _sse("agent_state", agent.to_dict())
+                        yield _sse("plan_updated", {
+                            "reason": decision.reason,
+                            "steps": [s.model_dump() for s in plan.steps],
+                        })
+                        agent.todo = type(agent.todo)()
+                        for s in plan.steps:
+                            agent.todo.add_task(s.description, tool_name=s.tool)
+                        yield _sse("todo_updated", agent.todo.to_dict())
+
+                case "ASK_USER":
+                    final_content = decision.reason
+                    agent.fail("Waiting for user input")
+                    yield _sse("agent_state", agent.to_dict())
+                    yield _sse("token", {"delta": decision.reason})
+                    break
+
+                case "ANSWER_DIRECTLY":
+                    final_content = decision.answer or decision.reason
+                    agent.complete()
+                    yield _sse("agent_state", agent.to_dict())
+                    break
+
+                case "FAIL":
+                    agent.fail(decision.reason)
+                    yield _sse("agent_state", agent.to_dict())
+                    yield _sse("error", {"message": decision.reason})
+                    yield _sse("done", {
+                        "token_count": 0,
+                        "activity": agent.activity,
+                        "tool_calls": agent.tool_call_count,
+                        "state": agent.state.value,
+                        "elapsed_ms": agent.get_elapsed_ms(),
+                        "plan": [
+                            {"id": s.id, "description": s.description, "status": s.status}
+                            for s in agent.plan
+                        ],
+                        "observations": [],
+                        "verification": None,
+                    })
+                    _result[0] = final_content
+                    return
+
+        else:
+            # Max iterations exhausted
+            if not final_content:
+                final_content = "I was unable to complete the analysis within the iteration limit."
+            agent.fail("Max iterations reached")
+            yield _sse("agent_state", agent.to_dict())
+            yield _sse("error", {"message": "Max iterations reached"})
+
+        _result[0] = final_content
+
     async def run(
         self,
         *,
@@ -201,10 +893,14 @@ class AgentRuntime:
         tool_descriptions: str = "",
         conversation_id: str | None = None,
         agent_state: AgentStateMachine | None = None,
+        agent_mode: str = "agent",
     ) -> AsyncGenerator[str, None]:
         """Execute the full autonomous agent loop.
 
         Yields SSE event strings. The caller wraps this in StreamingResponse.
+
+        Flow:
+          UNDERSTAND → ROUTE → (CONVERSATION | KNOWLEDGE | TASK) → PLAN → REASON → TOOL → OBSERVE → VERIFY
         """
         agent = agent_state or AgentStateMachine()
         start_time = time.monotonic()
@@ -240,496 +936,169 @@ class AgentRuntime:
         tool_results_context: list[str] = []
 
         try:
-            # === SIMPLE REQUEST DETECTION ===
-            if self._is_simple_request(goal):
-                # Skip planning entirely for simple greetings
-                final_content = goal.strip()
-                # Run lightweight verification
-                yield _sse("verification_started", {"type": "output"})
-                verification = VerificationResult(
-                    verified=True,
-                    confidence=1.0,
-                    criteria=[],
-                    missing=[],
-                )
-                agent.verify(type("VR", (), {
-                    "task_completed": True,
-                    "evidence_grounded": True,
-                    "tools_executed": [],
-                    "failed_tools": [],
-                    "unsupported_claims": [],
-                    "missing_evidence": [],
-                    "details": "Simple request — no tools needed",
-                })())
-                yield _sse("verification_passed", {"type": "output", "confidence": 1.0})
-                agent.complete()
-                yield _sse("agent_state", agent.to_dict())
-                # Fall through to finalization
-                plan = None
-            else:
-                plan = None
-                # === PHASE: PLANNING ===
-                if tool_names:
-                    plan = await self._create_plan(
-                        llm=llm,
-                        model=model,
-                        goal=goal,
-                        tool_names=tool_names,
-                        tool_descriptions=tool_descriptions,
-                    )
-                    if plan:
-                        agent.create_plan([
-                            {"description": s.description, "tool_name": s.tool}
-                            for s in plan.steps
-                        ])
-                        yield _sse("agent_state", agent.to_dict())
-                        yield _sse("plan_created", {
-                            "goal": plan.goal,
-                            "acceptance_criteria": plan.acceptance_criteria,
-                            "steps": [s.model_dump() for s in plan.steps],
-                        })
+            # ============================================================
+            # STAGE 1: UNDERSTAND / ROUTE (mandatory first stage)
+            # ============================================================
+            yield _sse("understanding_started", {"goal": goal[:200]})
 
-                        # Populate todo manager from plan
-                        for s in plan.steps:
-                            agent.todo.add_task(s.description, tool_name=s.tool)
-                        yield _sse("todo_updated", agent.todo.to_dict())
+            understanding = await self._understand(
+                llm=llm,
+                model=model,
+                goal=goal,
+                tool_descriptions=tool_descriptions,
+            )
 
-                # === PHASE: MAIN AGENT LOOP ===
-                for iteration in range(MAX_ITERATIONS):
-                    # Check wall-clock timeout
-                    elapsed = time.monotonic() - start_time
-                    if elapsed > AGENT_MAX_RUNTIME_SECONDS:
-                        agent.fail(
-                            f"Wall-clock timeout exceeded ({elapsed:.0f}s > {AGENT_MAX_RUNTIME_SECONDS}s)"
-                        )
-                        yield _sse("agent_state", agent.to_dict())
-                        yield _sse("error", {
-                            "message": f"Wall-clock timeout: {AGENT_MAX_RUNTIME_SECONDS}s exceeded"
-                        })
-                        yield _sse("done", {
-                            "token_count": 0,
-                            "activity": agent.activity,
-                            "tool_calls": agent.tool_call_count,
-                            "state": agent.state.value,
-                            "elapsed_ms": agent.get_elapsed_ms(),
-                            "plan": [
-                                {"id": s.id, "description": s.description, "status": s.status}
-                                for s in agent.plan
-                            ],
-                            "observations": [],
-                            "verification": None,
-                        })
-                        return
+            yield _sse("understanding_completed", {
+                "intent": understanding.intent.value,
+                "goal": understanding.goal[:200],
+                "needs_plan": understanding.needs_plan,
+                "needs_tools": understanding.needs_tools,
+                "needs_verification": understanding.needs_verification,
+                "confidence": understanding.confidence,
+                "reasoning": understanding.reasoning[:200],
+            })
 
-                    # Check if already in terminal state (e.g. cancelled between iterations)
-                    if agent.state in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
-                        break
+            logger.info(
+                "Understanding: intent=%s needs_plan=%s needs_tools=%s confidence=%.2f",
+                understanding.intent.value,
+                understanding.needs_plan,
+                understanding.needs_tools,
+                understanding.confidence,
+            )
 
-                    # Check safety limits
-                    limit_error = agent.check_limits()
-                    if limit_error:
-                        agent.fail(limit_error)
-                        yield _sse("agent_state", agent.to_dict())
-                        yield _sse("error", {"message": limit_error})
-                        yield _sse("done", {
-                            "token_count": 0,
-                            "activity": agent.activity,
-                            "tool_calls": agent.tool_call_count,
-                            "state": agent.state.value,
-                            "elapsed_ms": agent.get_elapsed_ms(),
-                            "plan": [
-                                {"id": s.id, "description": s.description, "status": s.status}
-                                for s in agent.plan
-                            ],
-                            "observations": [],
-                            "verification": None,
-                        })
-                        return
+            # ============================================================
+            # STAGE 2: ROUTE based on intent
+            # ============================================================
+            plan = None
 
-                    # --- REASON: Decide what to do next ---
-                    decision = await self._decide(
-                        llm=llm,
-                        model=model,
-                        goal=goal,
-                        agent=agent,
-                        observations=observations,
-                        evidence=evidence,
-                        failed_attempts=failed_attempts,
-                        tool_results_context=tool_results_context,
-                        tool_descriptions=tool_descriptions,
-                    )
-
-                    yield _sse("decision", {
-                        "decision": decision.decision,
-                        "reason": decision.reason,
-                        "iteration": iteration,
-                    })
-
-                    # If agent was cancelled during _decide, break
-                    if agent.state in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
-                        break
-
-                    match decision.decision:
-                        case "COMPLETE":
-                            # MUST go through verifier
-                            yield _sse("verification_started", {"type": "output"})
-                            verification = await self._verify(
-                                llm=llm,
-                                model=model,
-                                goal=goal,
-                                agent=agent,
-                                evidence=evidence,
-                                tool_results_context=tool_results_context,
-                                observations=observations,
-                            )
-                            yield _sse("verification", verification.model_dump())
-
-                            if verification.verified:
-                                yield _sse("verification_passed", {
-                                    "type": "output",
-                                    "confidence": verification.confidence,
-                                })
-                                final_content = decision.reason or "Task completed successfully."
-                                agent.complete()
-                                yield _sse("agent_state", agent.to_dict())
-                                break
-                            else:
-                                yield _sse("verification_failed", {
-                                    "type": "output",
-                                    "missing": verification.missing,
-                                })
-                                # Verifier rejected — replan
-                                logger.info("Verifier rejected completion: %s", verification.missing)
-                                failed_attempts.append({
-                                    "reason": "Completion rejected by verifier",
-                                    "missing": verification.missing,
-                                })
-                                new_plan = await self._replan(
-                                    llm=llm,
-                                    model=model,
-                                    goal=goal,
-                                    acceptance_criteria=plan.acceptance_criteria if plan else [],
-                                    failure_reason=f"Verification failed: {verification.missing}",
-                                    failed_steps=[],
-                                    evidence=evidence,
-                                )
-                                if new_plan:
-                                    plan = new_plan
-                                    agent.create_plan([
-                                        {"description": s.description, "tool_name": s.tool}
-                                        for s in plan.steps
-                                    ])
-                                    yield _sse("agent_state", agent.to_dict())
-                                    yield _sse("plan_updated", {
-                                        "reason": "Completion verification failed",
-                                        "steps": [s.model_dump() for s in plan.steps],
-                                    })
-                                    # Repopulate todo from new plan
-                                    agent.todo = type(agent.todo)()
-                                    for s in plan.steps:
-                                        agent.todo.add_task(s.description, tool_name=s.tool)
-                                    yield _sse("todo_updated", agent.todo.to_dict())
-
-                        case "VERIFY":
-                            yield _sse("verification_started", {"type": "output"})
-                            verification = await self._verify(
-                                llm=llm,
-                                model=model,
-                                goal=goal,
-                                agent=agent,
-                                evidence=evidence,
-                                tool_results_context=tool_results_context,
-                                observations=observations,
-                            )
-                            yield _sse("verification", verification.model_dump())
-
-                            if verification.verified:
-                                yield _sse("verification_passed", {
-                                    "type": "output",
-                                    "confidence": verification.confidence,
-                                })
-                                final_content = "Task completed and verified."
-                                agent.complete()
-                                yield _sse("agent_state", agent.to_dict())
-                                break
-                            else:
-                                yield _sse("verification_failed", {
-                                    "type": "output",
-                                    "missing": verification.missing,
-                                })
-
-                        case "CONTINUE" | "RETRY":
-                            if decision.next_action is None:
-                                agent.fail("Reasoner returned CONTINUE/RETRY without next_action")
-                                yield _sse("agent_state", agent.to_dict())
-                                yield _sse("error", {"message": "No action provided"})
-                                return
-
-                            action = decision.next_action
-
-                            # Skip tool if not in allowed list (tool_mode=none)
-                            if tool_names is not None and len(tool_names) == 0:
-                                logger.info("Tool %s skipped (tool_mode=none)", action.tool)
-                                continue
-
-                            # Enforce per-tool retry limit
-                            if not agent.can_retry(action.tool):
-                                logger.info("Tool %s exceeded retry limit, skipping", action.tool)
-                                failed_attempts.append({
-                                    "tool": action.tool,
-                                    "error": f"Exceeded max retries for {action.tool}",
-                                    "failure_type": "INVALID_TOOL_ARGUMENTS",
-                                })
-                                continue
-
-                            # --- Loop detection via action fingerprinting ---
-                            fp = _fingerprint(action.tool, action.input)
-                            _action_fingerprints[fp] = _action_fingerprints.get(fp, 0) + 1
-                            if _action_fingerprints[fp] >= _LOOP_DETECTION_THRESHOLD:
-                                logger.warning(
-                                    "Loop detected: fingerprint %s seen %d times",
-                                    fp[:80],
-                                    _action_fingerprints[fp],
-                                )
-                                failed_attempts.append({
-                                    "tool": action.tool,
-                                    "error": f"Loop detected: same action repeated {_action_fingerprints[fp]} times",
-                                    "failure_type": "TOOL_ERROR",
-                                })
-                                # Force replan to break the loop
-                                new_plan = await self._replan(
-                                    llm=llm,
-                                    model=model,
-                                    goal=goal,
-                                    acceptance_criteria=plan.acceptance_criteria if plan else [],
-                                    failure_reason=f"Loop detected: {action.tool} repeated {_action_fingerprints[fp]} times",
-                                    failed_steps=[action.tool],
-                                    evidence=evidence,
-                                )
-                                if new_plan:
-                                    plan = new_plan
-                                    agent.create_plan([
-                                        {"description": s.description, "tool_name": s.tool}
-                                        for s in plan.steps
-                                    ])
-                                    yield _sse("agent_state", agent.to_dict())
-                                    yield _sse("plan_updated", {
-                                        "reason": "Loop detected — replanning",
-                                        "steps": [s.model_dump() for s in plan.steps],
-                                    })
-                                    # Repopulate todo from new plan
-                                    agent.todo = type(agent.todo)()
-                                    for s in plan.steps:
-                                        agent.todo.add_task(s.description, tool_name=s.tool)
-                                    yield _sse("todo_updated", agent.todo.to_dict())
-                                else:
-                                    # No alternative plan; fail
-                                    agent.fail(
-                                        f"Loop detected: {action.tool} repeated "
-                                        f"{_action_fingerprints[fp]} times, no alternative plan"
-                                    )
-                                    yield _sse("agent_state", agent.to_dict())
-                                    yield _sse("error", {"message": "Loop detected, cannot recover"})
-                                    yield _sse("done", {
-                                        "token_count": 0,
-                                        "activity": agent.activity,
-                                        "tool_calls": agent.tool_call_count,
-                                        "state": agent.state.value,
-                                        "elapsed_ms": agent.get_elapsed_ms(),
-                                        "plan": [
-                                            {"id": s.id, "description": s.description, "status": s.status}
-                                            for s in agent.plan
-                                        ],
-                                        "observations": [],
-                                        "verification": None,
-                                    })
-                                    return
-                                continue
-
-                            call_id = f"call_{iteration}_{action.tool}"
-
-                            # --- Start matching todo task ---
-                            for t in agent.todo.tasks:
-                                if (
-                                    t.status == "pending"
-                                    and t.description
-                                    and action.tool
-                                    and t.tool_name == action.tool
-                                ):
-                                    agent.todo.start_task(t.id)
-                                    break
-                            yield _sse("todo_updated", agent.todo.to_dict())
-
-                            # Execute tool
-                            agent.start_execution()
-                            agent.record_tool_call(action.tool, call_id, action.reasoning[:200])
-                            yield _sse("tool_call", {
-                                "call_id": call_id,
-                                "tool": action.tool,
-                                "input_summary": str(action.input)[:200],
-                                "reasoning": action.reasoning[:200],
-                            })
-
-                            result = await self._execute_tool(
-                                tool_name=action.tool,
-                                tool_input=action.input,
-                                user_role=user_role,
-                                db=db,
-                                user_id=user_id,
-                                reg=reg,
-                            )
-
-                            # Objective verification
-                            passed, reason = _verify_tool_result(action.tool, result)
-                            status = "success" if passed else "failed"
-                            duration_ms = result.get("duration_ms", 0)
-
-                            agent.record_tool_result(
-                                action.tool, call_id, status,
-                                reason[:200], duration_ms,
-                                error=reason if not passed else None,
-                            )
-                            yield _sse("tool_result", {
-                                "call_id": call_id,
-                                "tool": action.tool,
-                                "status": status,
-                                "result_summary": reason[:500],
-                                "duration_ms": duration_ms,
-                                "error": reason if not passed else None,
-                            })
-
-                            # --- Update matching todo task ---
-                            for t in agent.todo.tasks:
-                                if t.status == "active" and t.tool_name == action.tool:
-                                    if passed:
-                                        agent.todo.complete_task(t.id)
-                                    else:
-                                        agent.todo.fail_task(t.id, reason[:200])
-                                    break
-                            yield _sse("todo_updated", agent.todo.to_dict())
-
-                            # Record observation
-                            obs = Observation(
-                                tool=action.tool,
-                                success=passed,
-                                exit_code=result.get("exit_code"),
-                                observation=reason,
-                                evidence=[reason] if passed else [],
-                                artifacts=self._extract_artifacts(action.tool, result),
-                                duration_ms=duration_ms,
-                                output_summary=str(result)[:500],
-                            )
-                            observations.append(obs)
-                            if passed:
-                                evidence.extend(obs.evidence)
-
-                            # Trim output for LLM context
-                            trimmed = self._trim_output(result)
-                            tool_results_context.append(
-                                f"Step {iteration+1}: {action.tool} → {status}\n"
-                                f"Output: {_json.dumps(trimmed)[:_MAX_OUTPUT_IN_CONTEXT]}"
-                            )
-
-                            # Observe
-                            from services.agent_state import Observation as _AgentObs
-                            agent_obs = _AgentObs(
-                                tool=action.tool,
-                                status="success" if passed else "error",
-                                facts=[reason[:100]],
-                                evidence_ids=[reason[:50]] if passed else [],
-                                duration_ms=duration_ms,
-                            )
-                            agent.observe(agent_obs)
-                            yield _sse("observation", {
-                                "tool": action.tool,
-                                "success": passed,
-                                "observation": reason[:300],
-                                "evidence": obs.evidence,
-                            })
-
-                            # Handle failure
-                            if not passed:
-                                failure_type = _classify_failure(action.tool, result, reason)
-                                failed_attempts.append({
-                                    "tool": action.tool,
-                                    "error": reason[:300],
-                                    "failure_type": failure_type,
-                                })
-
-                                if failure_type == "FATAL":
-                                    agent.fail(f"Fatal error: {reason[:200]}")
-                                    yield _sse("agent_state", agent.to_dict())
-                                    yield _sse("error", {"message": f"Fatal: {reason[:200]}"})
-                                    return
-
-                                if failure_type == "TRANSIENT" and agent.can_retry(action.tool):
-                                    agent.record_retry(action.tool)
-                                    yield _sse("retry", {
-                                        "tool": action.tool,
-                                        "attempt": agent.retries.get(action.tool, 0),
-                                        "reason": reason[:200],
-                                    })
-
-                        case "REPLAN":
-                            new_plan = await self._replan(
-                                llm=llm,
-                                model=model,
-                                goal=goal,
-                                acceptance_criteria=plan.acceptance_criteria if plan else [],
-                                failure_reason=decision.reason,
-                                failed_steps=[a["tool"] for a in failed_attempts[-3:]],
-                                evidence=evidence,
-                            )
-                            if new_plan:
-                                plan = new_plan
-                                agent.create_plan([
-                                    {"description": s.description, "tool_name": s.tool}
-                                    for s in plan.steps
-                                ])
-                                yield _sse("agent_state", agent.to_dict())
-                                yield _sse("plan_updated", {
-                                    "reason": decision.reason,
-                                    "steps": [s.model_dump() for s in plan.steps],
-                                })
-                                # Repopulate todo from new plan
-                                agent.todo = type(agent.todo)()
-                                for s in plan.steps:
-                                    agent.todo.add_task(s.description, tool_name=s.tool)
-                                yield _sse("todo_updated", agent.todo.to_dict())
-
-                        case "ASK_USER":
-                            final_content = decision.reason
-                            agent.fail("Waiting for user input")
-                            yield _sse("agent_state", agent.to_dict())
-                            yield _sse("token", {"delta": decision.reason})
-                            break
-
-                        case "FAIL":
-                            agent.fail(decision.reason)
-                            yield _sse("agent_state", agent.to_dict())
-                            yield _sse("error", {"message": decision.reason})
-                            yield _sse("done", {
-                                "token_count": 0,
-                                "activity": agent.activity,
-                                "tool_calls": agent.tool_call_count,
-                                "state": agent.state.value,
-                                "elapsed_ms": agent.get_elapsed_ms(),
-                                "plan": [
-                                    {"id": s.id, "description": s.description, "status": s.status}
-                                    for s in agent.plan
-                                ],
-                                "observations": [],
-                                "verification": None,
-                            })
-                            return
-
-                else:
-                    # Max iterations exhausted
-                    if not final_content:
-                        final_content = "I was unable to complete the analysis within the iteration limit."
-                    agent.fail("Max iterations reached")
+            match understanding.intent:
+                # --------------------------------------------------------
+                # CONVERSATION: greetings, small talk, farewells
+                # --------------------------------------------------------
+                case RequestIntent.CONVERSATION:
+                    # Direct response — no tools, no plan, no verification
+                    final_content = self._generate_conversation_response(goal)
+                    agent.complete()
                     yield _sse("agent_state", agent.to_dict())
-                    yield _sse("error", {"message": "Max iterations reached"})
+                    # Fall through to finalize
+
+                # --------------------------------------------------------
+                # KNOWLEDGE: questions, explanations, definitions
+                # --------------------------------------------------------
+                case RequestIntent.KNOWLEDGE:
+                    # Direct knowledge response — no plan, no tools
+                    final_content = await self._generate_knowledge_response(
+                        llm=llm, model=model, goal=goal,
+                    )
+                    agent.complete()
+                    yield _sse("agent_state", agent.to_dict())
+                    # Fall through to finalize
+
+                # --------------------------------------------------------
+                # ANALYSIS: compare, summarize, analyze
+                # --------------------------------------------------------
+                case RequestIntent.ANALYSIS:
+                    # May need tools but no multi-step plan
+                    if understanding.needs_tools and tool_names:
+                        # Single-step: use tools then respond
+                        final_content = await self._handle_analysis_with_tools(
+                            llm=llm, model=model, goal=goal,
+                            tool_names=tool_names, tool_descriptions=tool_descriptions,
+                            user_role=user_role, db=db, user_id=user_id, reg=reg,
+                            agent=agent, observations=observations, evidence=evidence,
+                            tool_results_context=tool_results_context,
+                            failed_attempts=failed_attempts,
+                            start_time=start_time,
+                            _action_fingerprints=_action_fingerprints,
+                        )
+                    else:
+                        # Pure analysis — LLM reasoning only
+                        final_content = await self._generate_knowledge_response(
+                            llm=llm, model=model, goal=goal,
+                        )
+                    agent.complete()
+                    yield _sse("agent_state", agent.to_dict())
+                    # Fall through to finalize
+
+                # --------------------------------------------------------
+                # TOOL_TASK: explicit single tool request
+                # --------------------------------------------------------
+                case RequestIntent.TOOL_TASK:
+                    # Single tool execution → observe → verify
+                    if tool_names:
+                        final_content = await self._handle_tool_task(
+                            llm=llm, model=model, goal=goal,
+                            tool_names=tool_names, tool_descriptions=tool_descriptions,
+                            user_role=user_role, db=db, user_id=user_id, reg=reg,
+                            agent=agent, observations=observations, evidence=evidence,
+                            tool_results_context=tool_results_context,
+                            failed_attempts=failed_attempts,
+                            start_time=start_time,
+                            _action_fingerprints=_action_fingerprints,
+                        )
+                    else:
+                        final_content = "I understand you want to use a tool, but no tools are currently available."
+                    agent.complete()
+                    yield _sse("agent_state", agent.to_dict())
+                    # Fall through to finalize
+
+                # --------------------------------------------------------
+                # TASK: complex multi-step work
+                # --------------------------------------------------------
+                case RequestIntent.TASK:
+                    # Full planner → reasoner → tools → verify loop
+                    if tool_names:
+                        plan = await self._create_plan(
+                            llm=llm,
+                            model=model,
+                            goal=understanding.goal,
+                            tool_names=tool_names,
+                            tool_descriptions=tool_descriptions,
+                        )
+                        if plan:
+                            agent.create_plan([
+                                {"description": s.description, "tool_name": s.tool}
+                                for s in plan.steps
+                            ])
+                            yield _sse("agent_state", agent.to_dict())
+                            yield _sse("plan_created", {
+                                "goal": plan.goal,
+                                "acceptance_criteria": plan.acceptance_criteria,
+                                "steps": [s.model_dump() for s in plan.steps],
+                            })
+
+                            # Populate todo manager from plan
+                            for s in plan.steps:
+                                agent.todo.add_task(s.description, tool_name=s.tool)
+                            yield _sse("todo_updated", agent.todo.to_dict())
+
+                    # Plan mode: only generate plan, don't execute
+                    if agent_mode == "plan":
+                        if plan:
+                            final_content = f"Plan created with {len(plan.steps)} steps:\n"
+                            for s in plan.steps:
+                                final_content += f"- {s.description}\n"
+                        else:
+                            final_content = "No plan could be generated for this request."
+                        agent.complete()
+                        yield _sse("agent_state", agent.to_dict())
+                    else:
+                        # === MAIN AGENT LOOP (for TASK intent only) ===
+                        _result = [""]
+                        async for event in self._run_agent_loop(
+                            llm=llm, model=model, goal=understanding.goal,
+                            agent=agent, plan=plan, reg=reg,
+                            tool_names=tool_names, tool_descriptions=tool_descriptions,
+                            user_role=user_role, db=db, user_id=user_id,
+                            observations=observations, evidence=evidence,
+                            failed_attempts=failed_attempts,
+                            tool_results_context=tool_results_context,
+                            start_time=start_time,
+                            _action_fingerprints=_action_fingerprints,
+                            _result=_result,
+                        ):
+                            yield event
+                        final_content = _result[0]
 
         except asyncio.CancelledError:
             if agent.state != AgentState.CANCELLED:
@@ -766,10 +1135,6 @@ class AgentRuntime:
             return
 
         # === FINALIZE ===
-        # Do NOT call agent.complete() here.
-        # COMPLETED is only set after successful verification (lines 245, 289).
-        # All other terminal states (FAILED, CANCELLED) are set explicitly in the loop.
-
         # Stream final answer as tokens
         for i in range(0, len(final_content), 4):
             chunk = final_content[i:i + 4]

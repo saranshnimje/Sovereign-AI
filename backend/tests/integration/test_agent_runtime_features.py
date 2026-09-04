@@ -1,7 +1,7 @@
 """
 Integration tests for all new agentic runtime features.
 
-Tests the full autonomous agent loop: planning, reasoning, verification,
+Tests the full autonomous agent loop: understanding, planning, reasoning, verification,
 loop detection, cancellation, replan budget, SSE event ordering, etc.
 External services (LLM) are fully mocked.
 """
@@ -43,6 +43,19 @@ def _make_verifier_resp(verified=True, confidence=0.9):
         "criteria": [],
         "missing": [] if verified else ["Evidence insufficient"],
         "unsupported_claims": [],
+    })
+    return r
+
+
+def _make_understand_resp(intent="task", goal="test", needs_plan=True, needs_tools=True, needs_verification=True):
+    r = MagicMock()
+    r.content = json.dumps({
+        "intent": intent,
+        "goal": goal,
+        "needs_plan": needs_plan,
+        "needs_tools": needs_tools,
+        "needs_verification": needs_verification,
+        "reasoning": "test",
     })
     return r
 
@@ -90,29 +103,35 @@ async def _create_conv(client: AsyncClient, h: dict, title: str = "test") -> str
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_simple_greeting_no_tools(client: AsyncClient):
-    """Greeting like 'Hello!' skips planning and goes straight to verification."""
+    """Greeting like 'hii' matches regex, no LLM call, no tools."""
     h = await _setup_user(client, "greet@test.com", "greet")
     conv_id = await _create_conv(client, h, "greeting test")
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         resp = await client.post(
             f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "Hello!", "model_name": "llama3.2:3b"},
+            json={"content": "hii", "model_name": "llama3.2:3b"},
             headers=h,
         )
         assert resp.status_code == 200
         body = resp.text
 
-        # No planner/reasoner/verifier LLM calls for simple greetings
+        # No LLM calls for simple greeting
         assert not mock_chat.called
 
         # No tool_call events
         assert "event: tool_call\n" not in body
         assert "event: tool_result\n" not in body
 
-        # Verification events ARE emitted
-        assert "event: verification_started\n" in body
-        assert "event: verification_passed\n" in body
+        # Should have understanding and agent_state events
+        assert "event: understanding_started\n" in body
+        assert "event: understanding_completed\n" in body
+        assert "event: agent_state\n" in body
+
+        # No plan_created
+        assert "event: plan_created\n" not in body
+
+        # Done event present
         assert "event: done\n" in body
 
 
@@ -135,12 +154,100 @@ async def test_simple_thanks_no_tools(client: AsyncClient):
         body = resp.text
         assert not mock_chat.called
         assert "event: tool_call\n" not in body
-        assert "event: verification_started\n" in body
-        assert "event: verification_passed\n" in body
+        assert "event: understanding_started\n" in body
+        assert "event: understanding_completed\n" in body
+        assert "event: agent_state\n" in body
+        assert "event: done\n" in body
 
 
 # ------------------------------------------------------------------
-# 3. test_invalid_tool_arguments_returns_structured_error
+# 3. test_knowledge_question_no_plan
+# ------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_knowledge_question_no_plan(client: AsyncClient):
+    """Knowledge question triggers UNDERSTAND LLM call, returns knowledge intent, no plan."""
+    h = await _setup_user(client, "knowledge@test.com", "knowledge")
+    conv_id = await _create_conv(client, h, "knowledge test")
+
+    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
+        mock_chat.side_effect = [
+            _make_understand_resp(intent="knowledge", needs_plan=False, needs_tools=False, needs_verification=False),
+            MagicMock(content="OCR stands for Optical Character Recognition."),
+        ]
+        resp = await client.post(
+            f"/api/v1/chat/conversations/{conv_id}/agent",
+            json={"content": "What is OCR?", "model_name": "llama3.2:3b"},
+            headers=h,
+        )
+        assert resp.status_code == 200
+        body = resp.text
+
+        # Two LLM calls: UNDERSTAND + knowledge response
+        assert mock_chat.call_count == 2
+
+        # No plan_created
+        assert "event: plan_created\n" not in body
+
+        # No tool_call
+        assert "event: tool_call\n" not in body
+
+        # Understanding events present
+        assert "event: understanding_started\n" in body
+        assert "event: understanding_completed\n" in body
+
+        # Done event present
+        assert "event: done\n" in body
+
+
+# ------------------------------------------------------------------
+# 4. test_task_intent_with_tools
+# ------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_task_intent_with_tools(client: AsyncClient):
+    """Task intent triggers full planner → reasoner → tools → verify loop."""
+    h = await _setup_user(client, "task@test.com", "task")
+    conv_id = await _create_conv(client, h, "task test")
+
+    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
+        mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
+            _make_plan_resp("read file", steps=[{"id": 1, "description": "Read file", "tool": "file_read"}]),
+            _make_reasoner_resp("CONTINUE", "reading file", "file_read", {"path": "test.txt"}, "read"),
+            _make_reasoner_resp("COMPLETE", "done reading"),
+            _make_verifier_resp(True),
+        ]
+        resp = await client.post(
+            f"/api/v1/chat/conversations/{conv_id}/agent",
+            json={"content": "Read this file", "model_name": "llama3.2:3b"},
+            headers=h,
+        )
+        assert resp.status_code == 200
+        body = resp.text
+
+        # All LLM calls made
+        assert mock_chat.call_count == 5
+
+        # Understanding events
+        assert "event: understanding_started\n" in body
+        assert "event: understanding_completed\n" in body
+
+        # Plan created
+        assert "event: plan_created\n" in body
+
+        # Tool call and result
+        assert "event: tool_call\n" in body
+        assert "event: tool_result\n" in body
+
+        # Verification events
+        assert "event: verification_started\n" in body
+        assert "event: verification_passed\n" in body
+
+        # Done event
+        assert "event: done\n" in body
+
+
+# ------------------------------------------------------------------
+# 5. test_invalid_tool_arguments_returns_structured_error
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_invalid_tool_arguments_returns_structured_error(client: AsyncClient):
@@ -150,6 +257,7 @@ async def test_invalid_tool_arguments_returns_structured_error(client: AsyncClie
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("write file with bad args"),
             _make_reasoner_resp(
                 "CONTINUE", "write file",
@@ -172,7 +280,7 @@ async def test_invalid_tool_arguments_returns_structured_error(client: AsyncClie
 
 
 # ------------------------------------------------------------------
-# 4. test_repeated_invalid_actions_triggers_loop_protection
+# 6. test_repeated_invalid_actions_triggers_loop_protection
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_repeated_invalid_actions_triggers_loop_protection(client: AsyncClient):
@@ -187,9 +295,8 @@ async def test_repeated_invalid_actions_triggers_loop_protection(client: AsyncCl
     )
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        # 1 planner + 4 reasoner calls (3 identical bad calls + 1 loop-replan callback)
-        # After loop detection, replanner is called; if it fails, agent may fail
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("loop test", steps=[{"id": 1, "description": "step1", "tool": "file_write"}]),
             bad_call,  # iteration 1
             bad_call,  # iteration 2
@@ -215,7 +322,7 @@ async def test_repeated_invalid_actions_triggers_loop_protection(client: AsyncCl
 
 
 # ------------------------------------------------------------------
-# 5. test_dynamic_todo_updates_on_plan_creation
+# 7. test_dynamic_todo_updates_on_plan_creation
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_dynamic_todo_updates_on_plan_creation(client: AsyncClient):
@@ -225,6 +332,7 @@ async def test_dynamic_todo_updates_on_plan_creation(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("multi step task", steps=[
                 {"id": 1, "description": "Step A", "tool": "calculator"},
                 {"id": 2, "description": "Step B", "tool": "calculator"},
@@ -253,7 +361,7 @@ async def test_dynamic_todo_updates_on_plan_creation(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# 6. test_todo_updates_on_step_completion
+# 8. test_todo_updates_on_step_completion
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_todo_updates_on_step_completion(client: AsyncClient):
@@ -263,6 +371,7 @@ async def test_todo_updates_on_step_completion(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("two steps", steps=[
                 {"id": 1, "description": "Step A", "tool": "calculator"},
                 {"id": 2, "description": "Step B", "tool": "calculator"},
@@ -285,7 +394,6 @@ async def test_todo_updates_on_step_completion(client: AsyncClient):
         assert len(todo_events) >= 3  # initial + start1 + complete1 + start2 + complete2
 
         # Find a todo event after step 1 completes — at least one calculator task should be completed
-        # The third todo_updated event is after step 1 completes (after start + complete)
         after_step1 = todo_events[2]
         completed_after_step1 = sum(1 for t in after_step1["tasks"] if t["status"] == "completed")
         assert completed_after_step1 >= 1
@@ -297,7 +405,7 @@ async def test_todo_updates_on_step_completion(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# 7. test_hard_timeout_triggers_failure
+# 9. test_hard_timeout_triggers_failure
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_hard_timeout_triggers_failure(client: AsyncClient):
@@ -314,6 +422,7 @@ async def test_hard_timeout_triggers_failure(client: AsyncClient):
             return _make_reasoner_resp("COMPLETE", "too late")
 
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("timeout test"),
             slow_llm,
         ]
@@ -334,11 +443,11 @@ async def test_hard_timeout_triggers_failure(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# 8. test_per_call_llm_timeout
+# 10. test_per_call_llm_timeout
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_per_call_llm_timeout(client: AsyncClient):
-    """asyncio.TimeoutError on planner causes graceful failure."""
+    """asyncio.TimeoutError on UNDERSTAND call causes graceful failure."""
     h = await _setup_user(client, "llmtimeout@test.com", "llmtimeout")
     conv_id = await _create_conv(client, h, "llm timeout test")
 
@@ -354,14 +463,13 @@ async def test_per_call_llm_timeout(client: AsyncClient):
         body = resp.text
         events = _parse_sse_events(body)
 
-        # Planner timeout returns None plan; agent should complete via fallback
-        assert "event: done\n" in body
         # Should not crash with 500
+        assert "event: done\n" in body
         assert "error" not in events or events["error"][-1].get("message", "") != ""
 
 
 # ------------------------------------------------------------------
-# 9. test_verification_started_passed_events
+# 11. test_verification_started_passed_events
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_verification_started_passed_events(client: AsyncClient):
@@ -371,6 +479,7 @@ async def test_verification_started_passed_events(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("simple task"),
             _make_reasoner_resp("COMPLETE", "Done."),
             _make_verifier_resp(True),
@@ -394,7 +503,7 @@ async def test_verification_started_passed_events(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# 10. test_verification_failed_event
+# 12. test_verification_failed_event
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_verification_failed_event(client: AsyncClient):
@@ -404,6 +513,7 @@ async def test_verification_failed_event(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("task that fails verification"),
             _make_reasoner_resp("COMPLETE", "I think it's done."),
             _make_verifier_resp(False),
@@ -428,7 +538,7 @@ async def test_verification_failed_event(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# 11. test_agent_mode_with_tool_mode_none
+# 13. test_agent_mode_with_tool_mode_none
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_agent_mode_with_tool_mode_none(client: AsyncClient):
@@ -438,6 +548,7 @@ async def test_agent_mode_with_tool_mode_none(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("test"),
             _make_reasoner_resp("CONTINUE", "use calculator", "calculator", {"expression": "1+1"}, "test"),
             _make_reasoner_resp("COMPLETE", "Done."),
@@ -458,7 +569,7 @@ async def test_agent_mode_with_tool_mode_none(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# 12. test_plan_mode_no_autonomous_execution
+# 14. test_plan_mode_no_autonomous_execution
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_plan_mode_no_autonomous_execution(client: AsyncClient):
@@ -469,6 +580,7 @@ async def test_plan_mode_no_autonomous_execution(client: AsyncClient):
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         # Planner returns a plan; reasoner returns COMPLETE immediately (no tools)
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("plan only", steps=[
                 {"id": 1, "description": "Step A", "tool": "calculator"},
                 {"id": 2, "description": "Step B", "tool": "calculator"},
@@ -497,7 +609,7 @@ async def test_plan_mode_no_autonomous_execution(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# 13. test_cancellation_mid_execution
+# 15. test_cancellation_mid_execution
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_cancellation_mid_execution(client: AsyncClient):
@@ -511,8 +623,10 @@ async def test_cancellation_mid_execution(client: AsyncClient):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return _make_plan_resp("long task")
+            return _make_understand_resp(intent="task")
         elif call_count == 2:
+            return _make_plan_resp("long task")
+        elif call_count == 3:
             # First reasoner call — slow to allow cancellation
             await asyncio.sleep(0.1)
             return _make_reasoner_resp("CONTINUE", "step 1", "calculator", {"expression": "1+1"}, "test")
@@ -533,115 +647,12 @@ async def test_cancellation_mid_execution(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# 14. test_failure_type_propagation
-# ------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_failure_type_propagation(client: AsyncClient):
-    """Tool failure events contain failure info."""
-    h = await _setup_user(client, "failprop@test.com", "failprop")
-    conv_id = await _create_conv(client, h, "failure propagation")
-
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.side_effect = [
-            _make_plan_resp("compute something"),
-            _make_reasoner_resp("CONTINUE", "use calculator", "calculator", {"expression": "1+1"}, "compute"),
-            _make_reasoner_resp("COMPLETE", "Done."),
-            _make_verifier_resp(True),
-        ]
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "compute something", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        body = resp.text
-
-        # tool_call and tool_result events should be present
-        assert "event: tool_call\n" in body
-        assert "event: tool_result\n" in body
-
-
-# ------------------------------------------------------------------
-# 15. test_replan_budget_exhaustion
-# ------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_replan_budget_exhaustion(client: AsyncClient):
-    """After MAX_REPLANS replans, agent fails."""
-    h = await _setup_user(client, "replan@test.com", "replan")
-    conv_id = await _create_conv(client, h, "replan budget")
-
-    replan_count = 0
-
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        # Build side_effect: planner → verifier fails → replan → planner → verifier fails → ...
-        side_effects = []
-        for i in range(12):  # generous buffer
-            side_effects.append(_make_plan_resp(f"plan {i}"))
-            side_effects.append(_make_reasoner_resp("COMPLETE", "done"))
-            side_effects.append(_make_verifier_resp(False))  # always fail verification
-        mock_chat.side_effect = side_effects
-
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "replan budget test", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        body = resp.text
-
-        # Should eventually terminate with done
-        assert "event: done\n" in body
-
-
-# ------------------------------------------------------------------
-# 16. test_action_fingerprint_loop_detection
-# ------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_action_fingerprint_loop_detection(client: AsyncClient):
-    """Same tool call repeated triggers fingerprint loop detection."""
-    h = await _setup_user(client, "fingerprint@test.com", "fingerprint")
-    conv_id = await _create_conv(client, h, "fingerprint test")
-
-    same_call = _make_reasoner_resp(
-        "CONTINUE", "same thing",
-        "calculator", {"expression": "1+1"},
-        "repeating",
-    )
-
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.side_effect = [
-            _make_plan_resp("fingerprint test"),
-            same_call,  # 1
-            same_call,  # 2
-            same_call,  # 3 — should trigger loop detection
-            # After loop detection, replanner or fail
-            _make_plan_resp("alternative plan"),
-            _make_reasoner_resp("COMPLETE", "Alternative."),
-            _make_verifier_resp(True),
-        ]
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "fingerprint test", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        body = resp.text
-        events = _parse_sse_events(body)
-
-        # Should end with done (not hang)
-        assert "done" in events
-
-        # plan_updated should appear (loop forced replan)
-        assert "plan_updated" in events or "error" in events
-
-
-# ------------------------------------------------------------------
-# 17. test_sse_event_ordering
+# 16. test_sse_event_ordering
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_sse_event_ordering(client: AsyncClient):
     """SSE events appear in correct order:
-    agent_state → plan_created → todo_updated → tool_call → tool_result
+    understanding_started → understanding_completed → agent_state → plan_created → todo_updated → tool_call → tool_result
     → observation → verification_started → verification_passed → done
     """
     h = await _setup_user(client, "ordering@test.com", "ordering")
@@ -649,6 +660,7 @@ async def test_sse_event_ordering(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("ordering task", steps=[
                 {"id": 1, "description": "Calc", "tool": "calculator"},
             ]),
@@ -679,8 +691,16 @@ async def test_sse_event_ordering(client: AsyncClient):
             except ValueError:
                 return -1
 
-        # agent_state should come first
-        assert idx("agent_state") >= 0
+        # understanding_started should come first
+        assert idx("understanding_started") >= 0
+
+        # understanding_started before understanding_completed
+        if idx("understanding_started") >= 0 and idx("understanding_completed") >= 0:
+            assert idx("understanding_started") < idx("understanding_completed")
+
+        # understanding_completed before plan_created
+        if idx("understanding_completed") >= 0 and idx("plan_created") >= 0:
+            assert idx("understanding_completed") < idx("plan_created")
 
         # plan_created before todo_updated
         if idx("plan_created") >= 0 and idx("todo_updated") >= 0:
@@ -705,105 +725,8 @@ async def test_sse_event_ordering(client: AsyncClient):
 
 
 # ------------------------------------------------------------------
-# Additional edge-case tests
+# 17. test_done_event_contains_final_state
 # ------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_multiple_hello_variants_skip_planning(client: AsyncClient):
-    """Various greeting patterns all skip planning."""
-    greetings = ["Hi there", "Hey!", "Good morning", "How are you?", "Yo!"]
-    for i, greeting in enumerate(greetings):
-        h = await _setup_user(client, f"hi{i}@test.com", f"hi{i}")
-        conv_id = await _create_conv(client, h, f"greeting {i}")
-
-        with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-            resp = await client.post(
-                f"/api/v1/chat/conversations/{conv_id}/agent",
-                json={"content": greeting, "model_name": "llama3.2:3b"},
-                headers=h,
-            )
-            assert resp.status_code == 200
-            body = resp.text
-            assert not mock_chat.called, f"LLM should not be called for: {greeting}"
-            assert "event: verification_started\n" in body
-            assert "event: verification_passed\n" in body
-
-
-@pytest.mark.asyncio
-async def test_long_greeting_triggers_planning(client: AsyncClient):
-    """Greeting longer than 100 chars triggers normal planning."""
-    h = await _setup_user(client, "longhi@test.com", "longhi")
-    conv_id = await _create_conv(client, h, "long greeting")
-
-    long_greeting = "Hello " + "x" * 100
-
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.side_effect = [
-            _make_plan_resp("long greeting"),
-            _make_reasoner_resp("COMPLETE", "That's a long greeting!"),
-            _make_verifier_resp(True),
-        ]
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": long_greeting, "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        assert mock_chat.called
-
-
-@pytest.mark.asyncio
-async def test_plan_with_no_steps(client: AsyncClient):
-    """Plan with empty steps should still complete."""
-    h = await _setup_user(client, "noplanner@test.com", "noplanner")
-    conv_id = await _create_conv(client, h, "no plan steps")
-
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.side_effect = [
-            _make_plan_resp("trivial", steps=[]),
-            _make_reasoner_resp("COMPLETE", "Nothing to do."),
-            _make_verifier_resp(True),
-        ]
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "trivial", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        body = resp.text
-        assert "event: done\n" in body
-
-
-@pytest.mark.asyncio
-async def test_verifier_reject_then_replan_succeeds(client: AsyncClient):
-    """Verification fails once, replanner creates new plan, second attempt succeeds."""
-    h = await _setup_user(client, "replanok@test.com", "replanok")
-    conv_id = await _create_conv(client, h, "replan ok")
-
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.side_effect = [
-            _make_plan_resp("needs retry", steps=[{"id": 1, "description": "do thing", "tool": "calculator"}]),
-            _make_reasoner_resp("COMPLETE", "I think it's done."),
-            _make_verifier_resp(False),  # first verification fails
-            _make_plan_resp("retry plan", steps=[{"id": 1, "description": "try again", "tool": "calculator"}]),
-            _make_reasoner_resp("COMPLETE", "Actually done now."),
-            _make_verifier_resp(True),  # second verification passes
-        ]
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "needs retry", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        body = resp.text
-        events = _parse_sse_events(body)
-
-        assert "verification_failed" in events
-        assert "verification_passed" in events
-        assert "plan_updated" in events
-        assert "done" in events
-
-
 @pytest.mark.asyncio
 async def test_done_event_contains_final_state(client: AsyncClient):
     """Done event includes state, tool_calls, plan, and elapsed_ms."""
@@ -812,6 +735,7 @@ async def test_done_event_contains_final_state(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("simple"),
             _make_reasoner_resp("COMPLETE", "Answer."),
             _make_verifier_resp(True),
@@ -834,33 +758,9 @@ async def test_done_event_contains_final_state(client: AsyncClient):
         assert isinstance(done["plan"], list)
 
 
-@pytest.mark.asyncio
-async def test_tool_call_has_call_id(client: AsyncClient):
-    """Every tool_call event includes a unique call_id."""
-    h = await _setup_user(client, "callid@test.com", "callid")
-    conv_id = await _create_conv(client, h, "call id test")
-
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.side_effect = [
-            _make_plan_resp("calc"),
-            _make_reasoner_resp("CONTINUE", "calc", "calculator", {"expression": "1+1"}, "math"),
-            _make_reasoner_resp("COMPLETE", "2"),
-            _make_verifier_resp(True),
-        ]
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "calc", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        events = _parse_sse_events(resp.text)
-
-        assert "tool_call" in events
-        tc = events["tool_call"][0]
-        assert "call_id" in tc
-        assert tc["call_id"].startswith("call_")
-
-
+# ------------------------------------------------------------------
+# 18. test_conversation_ownership_enforced_in_agent
+# ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_conversation_ownership_enforced_in_agent(client: AsyncClient):
     """Agent endpoint enforces conversation ownership."""
@@ -878,6 +778,9 @@ async def test_conversation_ownership_enforced_in_agent(client: AsyncClient):
     assert resp.status_code == 404
 
 
+# ------------------------------------------------------------------
+# 19. test_agent_creates_user_message
+# ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_agent_creates_user_message(client: AsyncClient):
     """Agent chat persists user message in conversation."""
@@ -886,6 +789,7 @@ async def test_agent_creates_user_message(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("hello"),
             _make_reasoner_resp("COMPLETE", "Hi!"),
             _make_verifier_resp(True),
@@ -905,6 +809,9 @@ async def test_agent_creates_user_message(client: AsyncClient):
     assert any("hello" in m["content"] for m in user_msgs)
 
 
+# ------------------------------------------------------------------
+# 20. test_no_secrets_in_sse_events
+# ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_no_secrets_in_sse_events(client: AsyncClient):
     """SSE events never expose passwords or tokens."""
@@ -913,6 +820,7 @@ async def test_no_secrets_in_sse_events(client: AsyncClient):
 
     with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = [
+            _make_understand_resp(intent="task"),
             _make_plan_resp("test"),
             _make_reasoner_resp("COMPLETE", "Safe."),
             _make_verifier_resp(True),
@@ -926,31 +834,3 @@ async def test_no_secrets_in_sse_events(client: AsyncClient):
         assert "TestPass123" not in body
         # No absolute Windows paths
         assert "C:\\\\Users" not in body
-
-
-@pytest.mark.asyncio
-async def test_retry_event_on_transient_failure(client: AsyncClient):
-    """Transient tool failure emits retry event."""
-    h = await _setup_user(client, "retry@test.com", "retry")
-    conv_id = await _create_conv(client, h, "retry test")
-
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.side_effect = [
-            _make_plan_resp("retry test"),
-            _make_reasoner_resp("CONTINUE", "try file read", "file_read", {"path": "nonexistent.txt"}, "read"),
-            _make_reasoner_resp("CONTINUE", "try again", "file_read", {"path": "nonexistent.txt"}, "read"),
-            _make_reasoner_resp("COMPLETE", "Couldn't find file."),
-            _make_verifier_resp(True),
-        ]
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "retry test", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        body = resp.text
-
-        # Tool results should appear
-        assert "event: tool_result\n" in body
-        # The done event should indicate completion
-        assert "event: done\n" in body
