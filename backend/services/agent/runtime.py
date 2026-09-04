@@ -473,6 +473,7 @@ class AgentRuntime:
                     "message": f"Wall-clock timeout: {AGENT_MAX_RUNTIME_SECONDS}s exceeded"
                 })
                 yield _sse("done", {
+                    "content": final_content,
                     "token_count": 0,
                     "activity": agent.activity,
                     "tool_calls": agent.tool_call_count,
@@ -499,6 +500,7 @@ class AgentRuntime:
                 yield _sse("agent_state", agent.to_dict())
                 yield _sse("error", {"message": limit_error})
                 yield _sse("done", {
+                    "content": final_content,
                     "token_count": 0,
                     "activity": agent.activity,
                     "tool_calls": agent.tool_call_count,
@@ -677,6 +679,7 @@ class AgentRuntime:
                             yield _sse("agent_state", agent.to_dict())
                             yield _sse("error", {"message": "Loop detected, cannot recover"})
                             yield _sse("done", {
+                                "content": final_content,
                                 "token_count": 0,
                                 "activity": agent.activity,
                                 "tool_calls": agent.tool_call_count,
@@ -855,6 +858,7 @@ class AgentRuntime:
                     yield _sse("agent_state", agent.to_dict())
                     yield _sse("error", {"message": decision.reason})
                     yield _sse("done", {
+                        "content": final_content,
                         "token_count": 0,
                         "activity": agent.activity,
                         "tool_calls": agent.tool_call_count,
@@ -1106,6 +1110,7 @@ class AgentRuntime:
             yield _sse("agent_state", agent.to_dict())
             yield _sse("cancelled", {"message": "Cancelled"})
             yield _sse("done", {
+                "content": final_content,
                 "token_count": 0,
                 "activity": agent.activity,
                 "tool_calls": agent.tool_call_count,
@@ -1123,6 +1128,7 @@ class AgentRuntime:
             yield _sse("agent_state", agent.to_dict())
             yield _sse("error", {"message": f"Agent error: {str(exc)[:200]}"})
             yield _sse("done", {
+                "content": final_content,
                 "token_count": 0,
                 "activity": agent.activity,
                 "tool_calls": agent.tool_call_count,
@@ -1142,6 +1148,7 @@ class AgentRuntime:
             yield _sse("token", {"delta": chunk})
 
         yield _sse("done", {
+            "content": final_content,
             "token_count": token_count,
             "activity": agent.activity,
             "tool_calls": agent.tool_call_count,

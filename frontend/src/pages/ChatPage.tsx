@@ -400,6 +400,26 @@ export default function ChatPage() {
             // This is idempotent: if already processed, subsequent done events are ignored
             if (!doneProcessed) {
               doneProcessed = true
+              // CRITICAL: Commit streamed content to detail.messages BEFORE clearing streaming.
+              // This prevents the "response disappears" gap where StreamingBubble unmounts
+              // but detail.messages doesn't have the assistant message yet.
+              // React 18 batches setDetail + updateStream in the same render cycle,
+              // so there is never a state where the response exists in neither source.
+              if (acc) {
+                const assistantMsg = {
+                  id: 'done-'+Date.now()+'-'+runId,
+                  role: 'assistant' as const,
+                  content: acc,
+                  token_count: null,
+                  finish_reason: null,
+                  created_at: new Date().toISOString(),
+                }
+                setDetail(prev => prev ? {
+                  ...prev,
+                  messages: [...prev.messages, assistantMsg],
+                  message_count: prev.messages.length + 1,
+                } : prev)
+              }
               updateStream(convId, {
                 streaming: false,
                 agentState: d.state || null,
@@ -437,9 +457,16 @@ export default function ChatPage() {
           if (attempt < MAX_RETRIES - 1 && finalAssistantContent) {
             await new Promise(r => setTimeout(r, 300 * (attempt + 1)))
           } else {
-            // Last attempt — use server data even if incomplete
-            setDetail(updated)
-            detailRef.current = updated
+            // Last attempt — only use server data if it has an assistant message.
+            // If not, keep current detail (which already has the committed assistant content
+            // from the done event handler above). Never overwrite with stale server data.
+            const currentDetail = useChatStore.getState().activeStreams[convId]
+            const detailHasAssistant = detailRef.current?.messages.some(m => m.role === 'assistant')
+            if (hasAssistant || !detailHasAssistant) {
+              setDetail(updated)
+              detailRef.current = updated
+            }
+            // If detail already has assistant and server doesn't, preserve the committed content
           }
         } catch {
           // Network error — keep current detail state
