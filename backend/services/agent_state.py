@@ -403,7 +403,8 @@ class AgentStateMachine:
     def verify(self, verification: VerificationResult) -> None:
         """Record verification result."""
         self.verification = verification
-        self.transition(AgentState.VERIFYING, reason=f"Task completed: {verification.task_completed}")
+        if self.state != AgentState.VERIFYING:
+            self.transition(AgentState.VERIFYING, reason=f"Task completed: {verification.task_completed}")
 
     def complete(self) -> None:
         """Mark as completed."""
