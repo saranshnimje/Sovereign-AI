@@ -183,6 +183,169 @@ export default function ChatPage() {
     })
   }, [convId, activeStreams, updateStream])
 
+  // SSE stream processor — handles all event parsing, token refresh, and state updates
+  const processSSEStream = useCallback(async (resp: Response, convId: string, controller: AbortController) => {
+    const reader = resp.body!.getReader()
+    const decoder = new TextDecoder()
+    let buf = '', acc = ''
+    let evidenceReceived: CitationSource[] = []
+    let tcAcc: ToolCall[] = []
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      // Handle both \n and \r\n line endings per SSE spec
+      const lines = buf.split(/\r?\n/)
+      buf = lines.pop() ?? ''
+
+      let ev = ''
+      for (const line of lines) {
+        // SSE spec: lines starting with : are comments (heartbeat) — skip
+        if (line.startsWith(':') || line === '') {
+          continue
+        }
+        if (line.startsWith('event:')) ev = line.slice(6).trim()
+        else if (line.startsWith('data:') && ev) {
+          const raw = line.slice(5).trim()
+          let d: any
+          try {
+            d = JSON.parse(raw)
+          } catch (e) {
+            console.warn('[SSE] Failed to parse JSON for event:', ev, raw)
+            ev = ''
+            continue
+          }
+
+          if (ev === 'token') {
+            acc += d.delta
+            updateStream(convId, { streamContent: acc })
+          } else if (ev === 'evidence') {
+            evidenceReceived = d.sources || []
+            updateStream(convId, { streamSources: evidenceReceived })
+          } else if (ev === 'tool_call') {
+            tcAcc = [...tcAcc, {
+              call_id: d.call_id, tool: d.tool, status: 'running',
+              input_summary: d.input_summary, reasoning: d.reasoning,
+              timestamp: Date.now(),
+            }]
+            updateStream(convId, { toolCalls: [...tcAcc] })
+          } else if (ev === 'tool_started') {
+            tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {...tc, status: 'running'} : tc)
+            updateStream(convId, { toolCalls: [...tcAcc] })
+          } else if (ev === 'tool_result') {
+            tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {
+              ...tc, status: d.status === 'success' ? 'success' : 'error',
+              result_summary: d.result_summary, duration_ms: d.duration_ms,
+              error: d.error,
+            } : tc)
+            updateStream(convId, { toolCalls: [...tcAcc] })
+          } else if (ev === 'tool_error') {
+            tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {
+              ...tc, status: 'error', error: d.error,
+            } : tc)
+            updateStream(convId, { toolCalls: [...tcAcc] })
+          } else if (ev === 'todo_updated') {
+            updateStream(convId, { todo: d.tasks || [] })
+          } else if (ev === 'todo_task_added') {
+            const stream = getStream(convId)
+            if (stream) {
+              updateStream(convId, {
+                todo: [...stream.todo, {
+                  id: d.task_id, description: d.description,
+                  status: d.status || 'pending',
+                }],
+              })
+            }
+          } else if (ev === 'agent_state') {
+            updateStream(convId, { agentState: d.state || null })
+          } else if (ev === 'plan_created') {
+            // Plan created — update agent state to show planning is done
+            updateStream(convId, { agentState: d.state || 'planning' })
+          } else if (ev === 'plan_updated') {
+            // Plan updated during replanning
+            updateStream(convId, { agentState: d.state || 'replanning' })
+          } else if (ev === 'decision') {
+            // Reasoning decision — show activity
+            updateStream(convId, { agentState: d.activity || d.state || 'reasoning' })
+          } else if (ev === 'verification') {
+            // Unified verification event from runtime
+            const status = d.verified ? 'passed' : 'failed'
+            updateStream(convId, {
+              verificationStatus: status,
+              verificationType: d.type || 'output',
+            })
+          } else if (ev === 'verification_started') {
+            updateStream(convId, {
+              verificationStatus: 'started',
+              verificationType: d.type || null,
+            })
+          } else if (ev === 'verification_passed') {
+            updateStream(convId, {
+              verificationStatus: 'passed',
+              verificationType: d.type || null,
+            })
+          } else if (ev === 'verification_failed') {
+            updateStream(convId, {
+              verificationStatus: 'failed',
+              verificationType: d.type || null,
+            })
+          } else if (ev === 'cancelled') {
+            updateStream(convId, {
+              streaming: false,
+              lastError: 'Cancelled',
+              agentState: 'cancelled',
+            })
+          } else if (ev === 'retry') {
+            // Tool retry — update agent state
+            updateStream(convId, { agentState: d.reason || 'retrying' })
+          } else if (ev === 'observation') {
+            // Observation from tool execution
+            updateStream(convId, { agentState: d.description || 'observing' })
+          } else if (ev === 'subagent_spawned') {
+            const stream = getStream(convId)
+            if (stream) {
+              updateStream(convId, {
+                subagents: [...stream.subagents, {
+                  session_id: d.session_id,
+                  agent_type: d.agent_type,
+                  task: d.task,
+                  status: 'running',
+                }],
+              })
+            }
+          } else if (ev === 'subagent_completed') {
+            const stream = getStream(convId)
+            if (stream) {
+              updateStream(convId, {
+                subagents: stream.subagents.map(s =>
+                  s.session_id === d.session_id
+                    ? { ...s, status: 'completed' }
+                    : s
+                ),
+              })
+            }
+          } else if (ev === 'done') {
+            // Final done event — update agent state and metadata
+            updateStream(convId, {
+              agentState: d.state || null,
+              lastError: null,
+            })
+          } else if (ev === 'error') {
+            updateStream(convId, { lastError: d.message || 'Unknown error' })
+            addToast({ type: 'error', title: 'AI Error', message: d.message })
+          }
+          ev = ''
+        }
+      }
+    }
+
+    // Stream complete - fetch updated conversation
+    const updated = await chatApi.getConversation(convId)
+    setDetail(updated)
+    updateConversation(convId, { title: updated.title, message_count: updated.messages.length })
+  }, [updateStream, getStream, addToast, setDetail, updateConversation])
+
   // Core send function - runs in background even if user navigates away
   const doSend = useCallback(async (text: string, convIdParam: string | undefined, model: ChatModelOption) => {
     if (!text.trim()) return
@@ -233,6 +396,18 @@ export default function ChatPage() {
 
     prefsApi.set(model.providerId, model.modelName).catch(() => {})
 
+    // Proactively refresh token before starting stream to avoid mid-stream 401
+    try {
+      const refreshResp = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
+        method: 'POST',
+        credentials: 'include',  // send httpOnly refresh cookie
+      })
+      if (refreshResp.ok) {
+        const { access_token } = await refreshResp.json()
+        if (access_token) useAuthStore.getState().setToken(access_token)
+      }
+    } catch { /* use existing token */ }
+
     const endpoint = useAgent
       ? `${API_BASE}/api/v1/chat/conversations/${currentConvId}/agent`
       : `${API_BASE}/api/v1/chat/conversations/${currentConvId}/messages`
@@ -257,131 +432,37 @@ export default function ChatPage() {
         signal: controller.signal,
       })
 
-      if (!resp.ok || !resp.body) throw new Error(`Stream failed (${resp.status})`)
-
-      const reader = resp.body.getReader()
-      const decoder = new TextDecoder()
-      let buf = '', acc = ''
-      let evidenceReceived: CitationSource[] = []
-      let tcAcc: ToolCall[] = []
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-
-        let ev = ''
-        for (const line of lines) {
-          if (line.startsWith('event: ')) ev = line.slice(7).trim()
-          else if (line.startsWith('data: ') && ev) {
-            try {
-              const d = JSON.parse(line.slice(6))
-              if (ev === 'token') {
-                acc += d.delta
-                updateStream(currentConvId!, { streamContent: acc })
-              } else if (ev === 'evidence') {
-                evidenceReceived = d.sources || []
-                updateStream(currentConvId!, { streamSources: evidenceReceived })
-              } else if (ev === 'tool_call') {
-                tcAcc = [...tcAcc, {
-                  call_id: d.call_id, tool: d.tool, status: 'running',
-                  input_summary: d.input_summary, reasoning: d.reasoning,
-                  timestamp: Date.now(),
-                }]
-                updateStream(currentConvId!, { toolCalls: [...tcAcc] })
-              } else if (ev === 'tool_started') {
-                tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {...tc, status: 'running'} : tc)
-                updateStream(currentConvId!, { toolCalls: [...tcAcc] })
-              } else if (ev === 'tool_result') {
-                tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {
-                  ...tc, status: d.status === 'success' ? 'success' : 'error',
-                  result_summary: d.result_summary, duration_ms: d.duration_ms,
-                  error: d.error,
-                } : tc)
-                updateStream(currentConvId!, { toolCalls: [...tcAcc] })
-              } else if (ev === 'tool_error') {
-                tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {
-                  ...tc, status: 'error', error: d.error,
-                } : tc)
-                updateStream(currentConvId!, { toolCalls: [...tcAcc] })
-              } else if (ev === 'todo_updated') {
-                updateStream(currentConvId!, { todo: d.tasks || [] })
-              } else if (ev === 'todo_task_added') {
-                const stream = getStream(currentConvId!)
-                if (stream) {
-                  updateStream(currentConvId!, {
-                    todo: [...stream.todo, {
-                      id: d.task_id, description: d.description,
-                      status: d.status || 'pending',
-                    }],
-                  })
-                }
-              } else if (ev === 'agent_state') {
-                updateStream(currentConvId!, { agentState: d.state || null })
-              } else if (ev === 'verification_started') {
-                updateStream(currentConvId!, {
-                  verificationStatus: 'started',
-                  verificationType: d.type || null,
-                })
-              } else if (ev === 'verification_passed') {
-                updateStream(currentConvId!, {
-                  verificationStatus: 'passed',
-                  verificationType: d.type || null,
-                })
-              } else if (ev === 'verification_failed') {
-                updateStream(currentConvId!, {
-                  verificationStatus: 'failed',
-                  verificationType: d.type || null,
-                })
-              } else if (ev === 'subagent_spawned') {
-                const stream = getStream(currentConvId!)
-                if (stream) {
-                  updateStream(currentConvId!, {
-                    subagents: [...stream.subagents, {
-                      session_id: d.session_id,
-                      agent_type: d.agent_type,
-                      task: d.task,
-                      status: 'running',
-                    }],
-                  })
-                }
-              } else if (ev === 'subagent_completed') {
-                const stream = getStream(currentConvId!)
-                if (stream) {
-                  updateStream(currentConvId!, {
-                    subagents: stream.subagents.map(s =>
-                      s.session_id === d.session_id
-                        ? { ...s, status: 'completed' }
-                        : s
-                    ),
-                  })
-                }
-              } else if (ev === 'recovery_started') {
-                // Show recovery in UI
-              } else if (ev === 'tool') {
-                tcAcc = [...tcAcc, {
-                  call_id: d.call_id || `legacy-${Date.now()}`,
-                  tool: d.tool, status: d.status === 'ok' ? 'success' : d.status === 'denied' ? 'denied' : d.status === 'approval_required' ? 'approval_required' : 'error',
-                  result_summary: d.summary, duration_ms: d.ms, error: d.error,
-                  timestamp: Date.now(),
-                }]
-                updateStream(currentConvId!, { toolCalls: [...tcAcc] })
-              } else if (ev === 'error') {
-                updateStream(currentConvId!, { lastError: d.message || 'Unknown error' })
-                addToast({ type: 'error', title: 'AI Error', message: d.message })
-              }
-            } catch { /* ignore parse errors */ }
-            ev = ''
+      // If 401, try one refresh + retry
+      if (resp.status === 401) {
+        try {
+          const retryRefresh = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
+            method: 'POST',
+            credentials: 'include',
+          })
+          if (retryRefresh.ok) {
+            const { access_token } = await retryRefresh.json()
+            if (access_token) {
+              useAuthStore.getState().setToken(access_token)
+              const retryResp = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${access_token}`,
+                },
+                body: JSON.stringify(body),
+                signal: controller.signal,
+              })
+              if (!retryResp.ok || !retryResp.body) throw new Error(`Stream failed (${retryResp.status})`)
+              return await processSSEStream(retryResp, currentConvId!, controller)
+            }
           }
-        }
+        } catch { /* fall through to error */ }
+        throw new Error('Authentication failed — please log in again')
       }
 
-      // Stream complete - fetch updated conversation
-      const updated = await chatApi.getConversation(currentConvId!)
-      setDetail(updated)
-      updateConversation(currentConvId!, { title: updated.title, message_count: updated.messages.length })
+      if (!resp.ok || !resp.body) throw new Error(`Stream failed (${resp.status})`)
+
+      await processSSEStream(resp, currentConvId!, controller)
     } catch (err: any) {
       if (err?.name === 'AbortError') {
         updateStream(currentConvId!, { streaming: false, lastError: 'Cancelled' })
@@ -403,7 +484,7 @@ export default function ChatPage() {
       // Refresh conversation list
       chatApi.listConversations().then(setConversations).catch(() => {})
     }
-  }, [toolMode, pluginMode, navigate, addToast, startStream, updateStream, endStream, updateConversation, addConversation, setConversations, convId])
+  }, [toolMode, pluginMode, agentMode, navigate, addToast, startStream, updateStream, endStream, updateConversation, addConversation, setConversations, processSSEStream, getStream, setDetail, convId])
 
   const handleSend = useCallback(() => {
     const text = input.trim()
@@ -704,12 +785,13 @@ export default function ChatPage() {
             <ToolCallCard calls={toolCalls} />
           )}
 
-          {(todo.length > 0 || subagents.length > 0 || verificationStatus !== 'none') && isStreaming && (
+          {(todo.length > 0 || subagents.length > 0 || verificationStatus !== 'none' || activeStream?.agentState) && isStreaming && (
             <AgentActivity
               todo={todo}
               subagents={subagents}
               verificationStatus={verificationStatus}
               verificationType={verificationType}
+              agentState={activeStream?.agentState ?? null}
             />
           )}
 

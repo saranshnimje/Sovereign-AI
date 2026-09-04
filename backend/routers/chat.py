@@ -451,29 +451,36 @@ async def send_agent_message(
         """
         import asyncio as _aio
 
-        async def _heartbeat():
-            while True:
-                await _aio.sleep(15)
-                yield ": heartbeat\n\n"
+        heartbeat_event = _aio.Event()
 
-        heartbeat_task = None
+        async def _heartbeat_ticker():
+            """Set the heartbeat event every 15 seconds."""
+            try:
+                while True:
+                    await _aio.sleep(15)
+                    heartbeat_event.set()
+            except _aio.CancelledError:
+                return
+
+        ticker_task = _aio.ensure_future(_heartbeat_ticker())
         try:
-            heartbeat_task = _aio.ensure_future(_heartbeat().__anext__())
             async for chunk in _gen():
-                if heartbeat_task and heartbeat_task.done():
-                    heartbeat_task = _aio.ensure_future(_heartbeat().__anext__())
+                # After yielding each chunk, check if heartbeat is due
+                if heartbeat_event.is_set():
+                    heartbeat_event.clear()
+                    yield ": heartbeat\n\n"
                 yield chunk
+            # Final heartbeat check after stream ends
+            if heartbeat_event.is_set():
+                yield ": heartbeat\n\n"
         except _aio.CancelledError:
             pass
         finally:
-            if heartbeat_task and not heartbeat_task.done():
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except _aio.CancelledError:
-                    pass
-                except StopAsyncIteration:
-                    pass
+            ticker_task.cancel()
+            try:
+                await ticker_task
+            except _aio.CancelledError:
+                pass
 
             if session.is_active:
                 try:
@@ -481,8 +488,16 @@ async def send_agent_message(
                 except Exception:
                     pass
 
+    async def _tracked_stream_with_untrack():
+        _track_stream(conv_id, current_user.id, "agent")
+        try:
+            async for chunk in _tracked_agent_gen():
+                yield chunk
+        finally:
+            _untrack_stream(conv_id)
+
     return StreamingResponse(
-        _tracked_agent_gen(),
+        _tracked_stream_with_untrack(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -6,6 +6,7 @@ interface AgentActivityProps {
   subagents: SubAgentInfo[]
   verificationStatus: 'none' | 'started' | 'passed' | 'failed'
   verificationType: string | null
+  agentState: string | null
 }
 
 const TODO_STATUS_CONFIG: Record<string, { icon: string; color: string }> = {
@@ -25,10 +26,28 @@ const AGENT_TYPE_ICONS: Record<string, string> = {
   data_analyst: '📊',
 }
 
-export default function AgentActivity({ todo, subagents, verificationStatus, verificationType }: AgentActivityProps) {
+const AGENT_STATE_LABELS: Record<string, { label: string; color: string; icon: string }> = {
+  idle: { label: 'Idle', color: 'text-neutral-500', icon: '○' },
+  planning: { label: 'Planning…', color: 'text-amber-400', icon: '📋' },
+  reasoning: { label: 'Reasoning…', color: 'text-cyan-400', icon: '🧠' },
+  executing: { label: 'Executing…', color: 'text-blue-400', icon: '⚙️' },
+  verifying: { label: 'Verifying…', color: 'text-purple-400', icon: '🔍' },
+  replanning: { label: 'Replanning…', color: 'text-amber-400', icon: '🔄' },
+  observing: { label: 'Observing…', color: 'text-cyan-400', icon: '👁' },
+  completed: { label: 'Completed', color: 'text-emerald-400', icon: '✓' },
+  failed: { label: 'Failed', color: 'text-red-400', icon: '✕' },
+  cancelled: { label: 'Cancelled', color: 'text-neutral-400', icon: '■' },
+  retrying: { label: 'Retrying…', color: 'text-amber-400', icon: '↻' },
+}
+
+export default function AgentActivity({ todo, subagents, verificationStatus, verificationType, agentState }: AgentActivityProps) {
   const [expanded, setExpanded] = useState<'todo' | 'subagents' | null>('todo')
 
-  if (todo.length === 0 && subagents.length === 0 && verificationStatus === 'none') {
+  // Show agent state indicator immediately, even before tasks/subagents appear
+  const stateInfo = agentState ? AGENT_STATE_LABELS[agentState] : null
+  const isActive = agentState && !['completed', 'failed', 'cancelled', 'idle'].includes(agentState)
+
+  if (todo.length === 0 && subagents.length === 0 && verificationStatus === 'none' && !agentState) {
     return null
   }
 
@@ -38,6 +57,17 @@ export default function AgentActivity({ todo, subagents, verificationStatus, ver
 
   return (
     <div className="rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/50 overflow-hidden mb-3">
+      {/* Agent State Indicator — always visible when agent is active */}
+      {agentState && stateInfo && (
+        <div className="px-3 py-2 text-xs border-b border-neutral-200 dark:border-neutral-700 flex items-center gap-2">
+          <span className={`${stateInfo.color} ${isActive ? 'animate-pulse' : ''}`}>{stateInfo.icon}</span>
+          <span className={`font-medium ${stateInfo.color}`}>{stateInfo.label}</span>
+          {isActive && (
+            <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse ml-1" />
+          )}
+        </div>
+      )}
+
       {/* Todo List */}
       {todo.length > 0 && (
         <>
