@@ -349,7 +349,9 @@ export default function ChatPage() {
   // Core send function - runs in background even if user navigates away
   const doSend = useCallback(async (text: string, convIdParam: string | undefined, model: ChatModelOption) => {
     if (!text.trim()) return
-    const useAgent = toolMode !== 'none'
+    // agentMode controls whether AgentRuntime is used
+    // toolMode controls tool availability (auto/none), independent of agent mode
+    const useAgent = agentMode === 'agent'
 
     let currentConvId = convIdParam
     if (!currentConvId) {
@@ -727,7 +729,7 @@ export default function ChatPage() {
         {/* Agent Settings */}
         <details className="w-full border-b border-surface-border bg-surface-raised/60">
           <summary className="cursor-pointer select-none px-4 py-1.5 text-xs font-medium text-cyan-700">
-            ⚙️ Agent Settings ({agentMode === 'plan' ? 'plan mode' : agentMode === 'agent' && toolMode !== 'none' ? 'agent mode' : 'direct chat'})
+            ⚙️ Agent Settings ({agentMode === 'agent' ? 'agent mode' : 'plan mode'} · tools: {toolMode})
           </summary>
           <div className="px-4 py-2 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
             <div>

@@ -14,6 +14,7 @@ States:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -22,10 +23,11 @@ from typing import Any
 # Safety limits — increased for autonomous operation
 MAX_ITERATIONS = 50
 MAX_TOOL_CALLS = 30
-MAX_EXECUTION_TIME_SECONDS = 600  # 10 minutes
+MAX_EXECUTION_TIME_SECONDS = int(os.environ.get("AGENT_MAX_RUNTIME_SECONDS", "300"))
 MAX_PLAN_STEPS = 20
 MAX_RETRIES = 3
 MAX_RETRIES_PER_TOOL = 2
+MAX_REPLANS = 5
 MAX_TODO_TASKS = 30
 MAX_SUBAGENT_CONCURRENT = 5
 
@@ -49,18 +51,18 @@ class AgentState(str, Enum):
 # Valid transitions: from_state → set of allowed to_states
 _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
     AgentState.IDLE: {AgentState.UNDERSTANDING, AgentState.FAILED, AgentState.CANCELLED},
-    AgentState.UNDERSTANDING: {AgentState.PLANNING, AgentState.EXECUTING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED},
+    AgentState.UNDERSTANDING: {AgentState.PLANNING, AgentState.EXECUTING, AgentState.VERIFYING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED},
     AgentState.PLANNING: {AgentState.EXECUTING, AgentState.VERIFYING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED},
     AgentState.EXECUTING: {
         AgentState.OBSERVING, AgentState.WAITING_APPROVAL,
         AgentState.VERIFYING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED
     },
-    AgentState.OBSERVING: {AgentState.REASONING, AgentState.EXECUTING, AgentState.VERIFYING, AgentState.FAILED, AgentState.CANCELLED},
+    AgentState.OBSERVING: {AgentState.REASONING, AgentState.EXECUTING, AgentState.VERIFYING, AgentState.FAILED, AgentState.CANCELLED, AgentState.PLANNING},
     AgentState.REASONING: {
         AgentState.EXECUTING, AgentState.VERIFYING,
         AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED
     },
-    AgentState.VERIFYING: {AgentState.COMPLETED, AgentState.EXECUTING, AgentState.FAILED, AgentState.CANCELLED},
+    AgentState.VERIFYING: {AgentState.COMPLETED, AgentState.EXECUTING, AgentState.FAILED, AgentState.CANCELLED, AgentState.PLANNING},
     AgentState.WAITING_APPROVAL: {AgentState.EXECUTING, AgentState.REASONING, AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED},
     AgentState.COMPLETED: set(),
     AgentState.FAILED: set(),
@@ -293,6 +295,7 @@ class AgentStateMachine:
         self.error_message: str = ""
         self.activity: list[dict[str, Any]] = []
         self.tool_results_context: list[str] = []
+        self.replan_count: int = 0
         self.todo: TodoManager = TodoManager()
 
     def transition(
@@ -427,6 +430,14 @@ class AgentStateMachine:
     def record_retry(self, tool_name: str) -> None:
         """Record a retry attempt."""
         self.retries[tool_name] = self.retries.get(tool_name, 0) + 1
+
+    def can_replan(self) -> bool:
+        """Check if we can still replan."""
+        return self.replan_count < MAX_REPLANS
+
+    def record_replan(self) -> None:
+        """Record a replan attempt."""
+        self.replan_count += 1
 
     def check_limits(self) -> str | None:
         """Check if any safety limit is exceeded. Returns error message or None."""

@@ -143,12 +143,12 @@ def test_classify_transient():
 
 
 def test_classify_bad_input():
-    assert _classify_failure("run_command", {"exit_code": 1}, "") == "BAD_INPUT"
-    assert _classify_failure("run_command", {}, "validation error: missing field") == "BAD_INPUT"
+    assert _classify_failure("run_command", {"exit_code": 1}, "") == "TOOL_ERROR"
+    assert _classify_failure("run_command", {}, "validation error: missing field") == "INVALID_TOOL_ARGUMENTS"
 
 
 def test_classify_unavailable():
-    assert _classify_failure("tool", {}, "tool not found") == "UNAVAILABLE"
+    assert _classify_failure("tool", {}, "tool not found") == "NOT_FOUND"
     assert _classify_failure("tool", {}, "service unavailable") == "UNAVAILABLE"
 
 
@@ -158,7 +158,7 @@ def test_classify_fatal():
 
 
 def test_classify_python_exec_bad_input():
-    assert _classify_failure("python_exec", {"exit_code": 1}, "") == "BAD_INPUT"
+    assert _classify_failure("python_exec", {"exit_code": 1}, "") == "TOOL_ERROR"
 
 
 # ------------------------------------------------------------------

@@ -223,3 +223,21 @@ History:
 
 Provide a compact summary (max {max_chars} chars).
 """
+
+
+# ---------------------------------------------------------------------------
+# Simple Request Prompt (for greetings and conversational queries)
+# ---------------------------------------------------------------------------
+
+SIMPLE_REQUEST_SYSTEM = """\
+You are a helpful AI assistant inside Sovereign AI Workbench.
+The user has sent a simple conversational message (greeting, thanks, etc.).
+Respond naturally, warmly, and concisely. Do NOT use any tools.
+Keep your response under 100 words.
+"""
+
+SIMPLE_REQUEST_USER = """\
+User message: {goal}
+
+Respond naturally to this message.
+"""

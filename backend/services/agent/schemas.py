@@ -73,6 +73,7 @@ class Observation(BaseModel):
     success: bool
     exit_code: int | None = None
     observation: str
+    failure_type: str | None = None
     evidence: list[str] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
     duration_ms: int = 0
@@ -103,7 +104,7 @@ class VerificationResult(BaseModel):
 
 class ReplanRequest(BaseModel):
     reason: str
-    failure_type: Literal["TRANSIENT", "BAD_INPUT", "UNAVAILABLE", "FATAL"] = "TRANSIENT"
+    failure_type: Literal["TRANSIENT", "INVALID_TOOL_ARGUMENTS", "NOT_FOUND", "RATE_LIMIT", "MODEL_ERROR", "TOOL_ERROR", "VERIFICATION_FAILED", "UNAVAILABLE", "FATAL"] = "TRANSIENT"
     new_steps: list[PlanStep] | None = None
 
 
