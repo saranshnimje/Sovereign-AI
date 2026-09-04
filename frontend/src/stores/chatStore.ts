@@ -28,6 +28,7 @@ export interface ActiveStream {
   lastError: string | null
   abortController: AbortController | null
   startedAt: number
+  runId: string // Unique ID for this stream run, used to filter stale events
   // Agent state
   todo: TodoTask[]
   subagents: SubAgentInfo[]
@@ -81,6 +82,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       lastError: null,
       abortController: null,
       startedAt: Date.now(),
+      runId: `run-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       todo: [],
       subagents: [],
       agentState: null,

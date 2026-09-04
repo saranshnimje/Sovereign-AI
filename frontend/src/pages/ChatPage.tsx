@@ -139,13 +139,17 @@ export default function ChatPage() {
         .catch(() => {
           if (latestFetchId.current !== convId) return
           setLoadingConv(false)
-          navigate('/chat')
+          // Don't navigate away if there's an active stream for this conversation
+          const stream = activeStreams[convId]
+          if (!stream?.streaming) {
+            navigate('/chat')
+          }
         })
     } else {
       setDetail(null)
       setLoadingConv(false)
     }
-  }, [convId, navigate])
+  }, [convId, navigate, activeStreams])
 
   // Auto-scroll when messages or stream content changes
   useEffect(() => {
@@ -156,6 +160,19 @@ export default function ChatPage() {
   useEffect(() => {
     inputRef.current?.focus()
   }, [convId])
+
+  // Cleanup active streams on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      // Abort any active streams when component unmounts
+      if (convId) {
+        const stream = activeStreams[convId]
+        if (stream?.abortController) {
+          stream.abortController.abort()
+        }
+      }
+    }
+  }, []) // Empty deps — only run on unmount
 
   // Close model dropdown on outside click
   useEffect(() => {
@@ -168,28 +185,48 @@ export default function ChatPage() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // Stop handler - abort the stream
+  // Stop handler - atomically abort and clear all streaming state
   const handleStop = useCallback(() => {
     if (!convId) return
     const stream = activeStreams[convId]
-    if (stream?.abortController) {
+    if (!stream) return
+
+    // Abort the controller first (this will trigger the AbortError in doSend)
+    if (stream.abortController) {
       stream.abortController.abort()
     }
+
+    // Atomically clear ALL streaming state
+    // The doSend catch block will also handle this, but we do it here
+    // to ensure immediate UI update (Stop button disappears instantly)
     updateStream(convId, {
       streaming: false,
       streamContent: '',
       streamSources: [],
       toolCalls: [],
+      lastError: 'Cancelled',
+      agentState: 'cancelled',
+      todo: [],
+      subagents: [],
+      verificationStatus: 'none',
+      verificationType: null,
     })
   }, [convId, activeStreams, updateStream])
 
   // SSE stream processor — handles all event parsing, token refresh, and state updates
-  const processSSEStream = useCallback(async (resp: Response, convId: string, controller: AbortController) => {
+  const processSSEStream = useCallback(async (resp: Response, convId: string, controller: AbortController, runId: string) => {
     const reader = resp.body!.getReader()
     const decoder = new TextDecoder()
     let buf = '', acc = ''
     let evidenceReceived: CitationSource[] = []
     let tcAcc: ToolCall[] = []
+    let doneProcessed = false
+
+    // Helper to check if this stream is still the active one (filters stale events)
+    const isStillActive = (): boolean => {
+      const stream = getStream(convId)
+      return stream?.runId === runId && stream?.streaming === true
+    }
 
     while (true) {
       const { done, value } = await reader.read()
@@ -213,6 +250,13 @@ export default function ChatPage() {
             d = JSON.parse(raw)
           } catch (e) {
             console.warn('[SSE] Failed to parse JSON for event:', ev, raw)
+            ev = ''
+            continue
+          }
+
+          // Filter stale events from old runs
+          if (!isStillActive() && ev !== 'done' && ev !== 'error') {
+            console.debug('[SSE] Ignoring stale event:', ev, 'for conv:', convId)
             ev = ''
             continue
           }
@@ -291,6 +335,7 @@ export default function ChatPage() {
               verificationType: d.type || null,
             })
           } else if (ev === 'cancelled') {
+            // Cancellation — atomically clear all streaming state
             updateStream(convId, {
               streaming: false,
               lastError: 'Cancelled',
@@ -326,13 +371,23 @@ export default function ChatPage() {
               })
             }
           } else if (ev === 'done') {
-            // Final done event — update agent state and metadata
-            updateStream(convId, {
-              agentState: d.state || null,
-              lastError: null,
-            })
+            // Final done event — atomically clear ALL streaming state
+            // This is idempotent: if already processed, subsequent done events are ignored
+            if (!doneProcessed) {
+              doneProcessed = true
+              updateStream(convId, {
+                streaming: false,
+                agentState: d.state || null,
+                lastError: null,
+              })
+            }
           } else if (ev === 'error') {
-            updateStream(convId, { lastError: d.message || 'Unknown error' })
+            // Error — atomically clear streaming state and show error
+            updateStream(convId, {
+              streaming: false,
+              lastError: d.message || 'Unknown error',
+              agentState: 'failed',
+            })
             addToast({ type: 'error', title: 'AI Error', message: d.message })
           }
           ev = ''
@@ -341,9 +396,16 @@ export default function ChatPage() {
     }
 
     // Stream complete - fetch updated conversation
-    const updated = await chatApi.getConversation(convId)
-    setDetail(updated)
-    updateConversation(convId, { title: updated.title, message_count: updated.messages.length })
+    // Only update if this stream is still active (prevents stale updates)
+    if (isStillActive() || doneProcessed) {
+      try {
+        const updated = await chatApi.getConversation(convId)
+        setDetail(updated)
+        updateConversation(convId, { title: updated.title, message_count: updated.messages.length })
+      } catch {
+        // Conversation may not exist yet or network error — ignore
+      }
+    }
   }, [updateStream, getStream, addToast, setDetail, updateConversation])
 
   // Core send function - runs in background even if user navigates away
@@ -363,7 +425,8 @@ export default function ChatPage() {
 
     // Start stream in store (persists across navigations)
     const controller = new AbortController()
-    startStream(currentConvId)
+    const stream = startStream(currentConvId)
+    const runId = stream.runId
     updateStream(currentConvId, {
       streaming: true,
       streamContent: '',
@@ -455,7 +518,7 @@ export default function ChatPage() {
                 signal: controller.signal,
               })
               if (!retryResp.ok || !retryResp.body) throw new Error(`Stream failed (${retryResp.status})`)
-              return await processSSEStream(retryResp, currentConvId!, controller)
+              return await processSSEStream(retryResp, currentConvId!, controller, runId)
             }
           }
         } catch { /* fall through to error */ }
@@ -464,14 +527,28 @@ export default function ChatPage() {
 
       if (!resp.ok || !resp.body) throw new Error(`Stream failed (${resp.status})`)
 
-      await processSSEStream(resp, currentConvId!, controller)
+      await processSSEStream(resp, currentConvId!, controller, runId)
     } catch (err: any) {
+      // Check if this stream is still the active one before updating state
+      const currentStream = getStream(currentConvId!)
+      if (currentStream?.runId !== runId) return // Stale error, ignore
+
       if (err?.name === 'AbortError') {
-        updateStream(currentConvId!, { streaming: false, lastError: 'Cancelled' })
+        // User cancelled — atomically clear all streaming state
+        updateStream(currentConvId!, {
+          streaming: false,
+          lastError: 'Cancelled',
+          agentState: 'cancelled',
+        })
         setRetryData({ convId: currentConvId!, text, model })
         return
       }
-      updateStream(currentConvId!, { streaming: false, lastError: err?.message || 'Send failed' })
+      // Error — atomically clear streaming state and show error
+      updateStream(currentConvId!, {
+        streaming: false,
+        lastError: err?.message || 'Send failed',
+        agentState: 'failed',
+      })
       setRetryData({ convId: currentConvId!, text, model })
       addToast({ type: 'error', title: 'Send failed', message: err?.message })
       // Refetch conversation to sync state (removes optimistic message if server didn't save it)
@@ -481,7 +558,11 @@ export default function ChatPage() {
         updateConversation(currentConvId!, { title: updated.title, message_count: updated.messages.length })
       } catch { /* conversation may not exist yet */ }
     } finally {
-      endStream(currentConvId!)
+      // Only end stream if this is still the active run
+      const currentStream = getStream(currentConvId!)
+      if (currentStream?.runId === runId) {
+        endStream(currentConvId!)
+      }
       inputRef.current?.focus()
       // Refresh conversation list
       chatApi.listConversations().then(setConversations).catch(() => {})
