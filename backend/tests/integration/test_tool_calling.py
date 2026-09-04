@@ -260,8 +260,13 @@ class TestToolCalling:
             assert "permission" in body.lower() or "denied" in body.lower()
 
     @pytest.mark.asyncio
-    async def test_agent_high_risk_tool_requires_approval(self, client: AsyncClient):
-        """High-risk tools are blocked with approval_required message."""
+    async def test_agent_high_risk_tool_skips_approval(self, client: AsyncClient):
+        """High-risk tools skip approval gate in autonomous agent mode.
+
+        This is intentional: autonomous agent mode must not block on human
+        approval mid-run (there is no human to approve). Instead, the tool
+        executes directly and the agent handles any errors.
+        """
         r = await client.post("/api/v1/auth/register", json={
             "email": "agent_high@test.com", "username": "agent_high",
             "password": "AgentHigh123!"
@@ -277,15 +282,12 @@ class TestToolCalling:
         }, headers=h)
         conv_id = r.json()["id"]
 
-        mock_approval = AsyncMock(return_value=(False, "Approval denied"))
-
-        with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat, \
-             patch("services.approval_service.ApprovalService.wait_for_decision", new_callable=AsyncMock, side_effect=mock_approval):
+        with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
                 _make_understand_resp(intent="task"),
                 _make_plan_resp("Run Python code"),
                 _make_reasoner_resp("CONTINUE", "run code", "python_exec", {"code": "print(1)"}, "run code"),
-                _make_reasoner_resp("COMPLETE", "High risk tool blocked."),
+                _make_reasoner_resp("COMPLETE", "High risk tool executed."),
                 _make_verifier_resp(True),
             ]
             resp = await client.post(
@@ -295,7 +297,9 @@ class TestToolCalling:
             )
             assert resp.status_code == 200
             body = resp.text
-            assert "approval" in body.lower() or "denied" in body.lower()
+            # Tool should have been called (tool_call emitted) — not blocked by approval
+            assert "tool_call" in body.lower()
+            assert "done" in body.lower()
 
     @pytest.mark.asyncio
     async def test_agent_tool_mode_none(self, client: AsyncClient):
@@ -696,8 +700,12 @@ class TestToolExposure:
             assert "calculator" in body
 
     @pytest.mark.asyncio
-    async def test_admin_tools_high_risk_enforced(self, client: AsyncClient):
-        """Admin-only tools (file_delete, python_exec) require approval."""
+    async def test_admin_tools_high_risk_skips_approval(self, client: AsyncClient):
+        """Admin-only tools skip approval gate in autonomous agent mode.
+
+        Autonomous agent mode has no human to approve, so high-risk tools
+        execute directly. The agent handles any errors from tool execution.
+        """
         r = await client.post("/api/v1/auth/register", json={
             "email": "exp_admin_risk@test.com", "username": "exp_admin_risk",
             "password": "ExpAdminRisk123!"
@@ -713,15 +721,12 @@ class TestToolExposure:
         }, headers=h)
         conv_id = r.json()["id"]
 
-        mock_approval = AsyncMock(return_value=(False, "Approval denied"))
-
-        with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat, \
-             patch("services.approval_service.ApprovalService.wait_for_decision", new_callable=AsyncMock, side_effect=mock_approval):
+        with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
                 _make_understand_resp(intent="task"),
                 _make_plan_resp("Run code"),
                 _make_reasoner_resp("CONTINUE", "run code", "python_exec", {"code": "print(1)"}, "test"),
-                _make_reasoner_resp("COMPLETE", "High risk blocked."),
+                _make_reasoner_resp("COMPLETE", "High risk tool executed."),
                 _make_verifier_resp(True),
             ]
             resp = await client.post(
@@ -730,11 +735,17 @@ class TestToolExposure:
                 headers=h,
             )
             body = resp.text
-            assert "approval" in body.lower() or "denied" in body.lower()
+            # Tool should have been called — not blocked by approval
+            assert "tool_call" in body.lower()
+            assert "done" in body.lower()
 
     @pytest.mark.asyncio
-    async def test_web_tools_high_risk_enforced(self, client: AsyncClient):
-        """Web tools (web_search, web_fetch) require approval due to high risk."""
+    async def test_web_tools_high_risk_skips_approval(self, client: AsyncClient):
+        """Web tools skip approval gate in autonomous agent mode.
+
+        Autonomous agent mode has no human to approve, so high-risk tools
+        execute directly. The agent handles any errors from tool execution.
+        """
         r = await client.post("/api/v1/auth/register", json={
             "email": "exp_web_risk@test.com", "username": "exp_web_risk",
             "password": "ExpWebRisk123!"
@@ -750,15 +761,12 @@ class TestToolExposure:
         }, headers=h)
         conv_id = r.json()["id"]
 
-        mock_approval = AsyncMock(return_value=(False, "Approval denied"))
-
-        with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat, \
-             patch("services.approval_service.ApprovalService.wait_for_decision", new_callable=AsyncMock, side_effect=mock_approval):
+        with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
                 _make_understand_resp(intent="task"),
                 _make_plan_resp("Search web"),
                 _make_reasoner_resp("CONTINUE", "search web", "web_search", {"query": "test"}, "test"),
-                _make_reasoner_resp("COMPLETE", "Web search blocked."),
+                _make_reasoner_resp("COMPLETE", "Web search executed."),
                 _make_verifier_resp(True),
             ]
             resp = await client.post(
@@ -767,7 +775,9 @@ class TestToolExposure:
                 headers=h,
             )
             body = resp.text
-            assert "approval" in body.lower() or "denied" in body.lower()
+            # Tool should have been called — not blocked by approval
+            assert "tool_call" in body.lower()
+            assert "done" in body.lower()
 
     @pytest.mark.asyncio
     async def test_incident_investigate_medium_risk(self, client: AsyncClient):

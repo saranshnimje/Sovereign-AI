@@ -12,6 +12,7 @@ import StreamingBubble from '../components/chat/StreamingBubble'
 import EvidencePanel from '../components/chat/EvidencePanel'
 import ToolCallCard, { ToolCall } from '../components/chat/ToolCallCard'
 import AgentActivity from '../components/chat/AgentActivity'
+import AgentTimeline from '../components/chat/AgentTimeline'
 
 interface ChatModelOption {
   providerId: string | null
@@ -26,6 +27,7 @@ export default function ChatPage() {
   const {
     conversations, setConversations, updateConversation, addConversation, removeConversation,
     activeStreams, startStream, updateStream, endStream, getStream,
+    agentEvents, addAgentEvent, setAgentEvents,
   } = useChatStore()
 
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
@@ -155,6 +157,23 @@ export default function ChatPage() {
           setDetail(d)
           detailRef.current = d
           setLoadingConv(false)
+
+          // Load persisted agent events for this conversation
+          chatApi.getAgentEvents(convId)
+            .then(({ events }) => {
+              if (latestFetchId.current !== convId) return
+              if (events.length > 0) {
+                setAgentEvents(convId, events.map(e => ({
+                  id: e.id,
+                  run_id: e.run_id,
+                  sequence: e.sequence,
+                  event_type: e.event_type,
+                  payload: e.payload,
+                  created_at: e.created_at,
+                })))
+              }
+            })
+            .catch(() => {}) // Non-fatal
         })
         .catch(() => {
           if (latestFetchId.current !== convId) return
@@ -245,11 +264,26 @@ export default function ChatPage() {
     let tcAcc: ToolCall[] = []
     let doneProcessed = false
     let finalAssistantContent = '' // Track final content for reconciliation
+    let eventSequence = 0 // Track sequence for durable events
 
     // Helper to check if this stream is still the active one (filters stale events)
     const isStillActive = (): boolean => {
       const stream = getStream(convId)
       return stream?.runId === runId && stream?.streaming === true
+    }
+
+    // Helper to store an agent event in durable state
+    const storeEvent = (eventType: string, payload: Record<string, unknown>) => {
+      eventSequence++
+      const evt = {
+        id: `evt-${runId}-${eventSequence}`,
+        run_id: runId,
+        sequence: eventSequence,
+        event_type: eventType,
+        payload,
+        created_at: new Date().toISOString(),
+      }
+      addAgentEvent(convId, evt)
     }
 
     while (true) {
@@ -299,6 +333,7 @@ export default function ChatPage() {
               timestamp: Date.now(),
             }]
             updateStream(convId, { toolCalls: [...tcAcc] })
+            storeEvent('tool_call', d)
           } else if (ev === 'tool_started') {
             tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {...tc, status: 'running'} : tc)
             updateStream(convId, { toolCalls: [...tcAcc] })
@@ -309,11 +344,19 @@ export default function ChatPage() {
               error: d.error,
             } : tc)
             updateStream(convId, { toolCalls: [...tcAcc] })
+            storeEvent('tool_result', d)
           } else if (ev === 'tool_error') {
             tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {
               ...tc, status: 'error', error: d.error,
             } : tc)
             updateStream(convId, { toolCalls: [...tcAcc] })
+            storeEvent('tool_error', d)
+          } else if (ev === 'tool_timeout') {
+            tcAcc = tcAcc.map(tc => tc.call_id === d.call_id ? {
+              ...tc, status: 'timeout', error: d.error, duration_ms: d.duration_ms,
+            } : tc)
+            updateStream(convId, { toolCalls: [...tcAcc] })
+            storeEvent('tool_timeout', d)
           } else if (ev === 'todo_updated') {
             updateStream(convId, { todo: d.tasks || [] })
           } else if (ev === 'todo_task_added') {
@@ -372,6 +415,28 @@ export default function ChatPage() {
           } else if (ev === 'observation') {
             // Observation from tool execution
             updateStream(convId, { agentState: d.description || 'observing' })
+            storeEvent('observation', d)
+          } else if (ev === 'final_response') {
+            // Final response content — store in durable state before done clears streaming
+            // This is the critical handoff: response content persisted to DB by backend,
+            // now committed to durable frontend state
+            storeEvent('final_response', d)
+          } else if (ev === 'agent_started') {
+            storeEvent('agent_started', d)
+          } else if (ev === 'plan_created') {
+            storeEvent('plan_created', d)
+          } else if (ev === 'plan_updated') {
+            storeEvent('plan_updated', d)
+          } else if (ev === 'retry') {
+            storeEvent('retry', d)
+          } else if (ev === 'verification_started') {
+            storeEvent('verification_started', d)
+          } else if (ev === 'verification_passed') {
+            storeEvent('verification_passed', d)
+          } else if (ev === 'verification_failed') {
+            storeEvent('verification_failed', d)
+          } else if (ev === 'todo_updated') {
+            storeEvent('todo_updated', d)
           } else if (ev === 'subagent_spawned') {
             const stream = getStream(convId)
             if (stream) {
@@ -398,6 +463,7 @@ export default function ChatPage() {
           } else if (ev === 'done') {
             // Final done event — atomically clear ALL streaming state
             // This is idempotent: if already processed, subsequent done events are ignored
+            storeEvent('done', d)
             if (!doneProcessed) {
               doneProcessed = true
               // CRITICAL: Commit streamed content to detail.messages BEFORE clearing streaming.
@@ -428,6 +494,7 @@ export default function ChatPage() {
             }
           } else if (ev === 'error') {
             // Error — atomically clear streaming state and show error
+            storeEvent('error', d)
             updateStream(convId, {
               streaming: false,
               lastError: d.message || 'Unknown error',
@@ -474,7 +541,7 @@ export default function ChatPage() {
         }
       }
     }
-  }, [updateStream, getStream, addToast, setDetail, updateConversation])
+  }, [updateStream, getStream, addToast, setDetail, updateConversation, addAgentEvent])
 
   // Core send function - runs in background even if user navigates away
   const doSend = useCallback(async (text: string, convIdParam: string | undefined, model: ChatModelOption) => {
@@ -934,6 +1001,14 @@ export default function ChatPage() {
           {detail?.messages.map((m) => (
             <MessageBubble key={m.id} msg={m} />
           ))}
+
+          {/* Durable agent timeline — persists after streaming ends */}
+          {convId && agentEvents[convId]?.length > 0 && (
+            <AgentTimeline
+              events={agentEvents[convId]}
+              isStreaming={isStreaming}
+            />
+          )}
 
           {toolCalls.length > 0 && isStreaming && (
             <ToolCallCard calls={toolCalls} />

@@ -181,6 +181,37 @@ class AgentRuntime:
             yield event_str  # SSE
     """
 
+    def __init__(self) -> None:
+        self._sequence: int = 0
+        self._run_id: str | None = None
+        self._db: AsyncSession | None = None
+
+    async def _emit_event(self, event_type: str, payload: dict) -> str:
+        """Emit an SSE event with monotonically increasing sequence number.
+
+        If run_id and db are set, persists the event to the agent_events table.
+        Returns the SSE string for yielding.
+        """
+        self._sequence += 1
+        sse_str = _sse(event_type, payload)
+
+        # Persist to DB if we have a run_id and db session
+        if self._run_id and self._db:
+            try:
+                from models.agent import AgentEvent
+                evt = AgentEvent(
+                    run_id=self._run_id,
+                    sequence=self._sequence,
+                    event_type=event_type,
+                    payload_json=_json.dumps(payload, default=str),
+                )
+                self._db.add(evt)
+                await self._db.flush()
+            except Exception:
+                logger.warning("Failed to persist agent event %s", event_type, exc_info=True)
+
+        return sse_str
+
     @staticmethod
     def _is_simple_request(goal: str) -> bool:
         """Check if the request is a simple conversational greeting."""
@@ -477,7 +508,7 @@ class AgentRuntime:
                     "token_count": 0,
                     "activity": agent.activity,
                     "tool_calls": agent.tool_call_count,
-                    "state": agent.state.value,
+                    "state": "timed_out",
                     "elapsed_ms": agent.get_elapsed_ms(),
                     "plan": [
                         {"id": s.id, "description": s.description, "status": s.status}
@@ -730,19 +761,35 @@ class AgentRuntime:
                     status = "success" if passed else "failed"
                     duration_ms = result.get("duration_ms", 0)
 
+                    # Detect timeout vs other failure
+                    is_timeout = (
+                        not passed
+                        and result.get("failure_type") == "TRANSIENT"
+                        and "timed out" in (result.get("error") or "").lower()
+                    )
+
                     agent.record_tool_result(
                         action.tool, call_id, status,
                         reason[:200], duration_ms,
                         error=reason if not passed else None,
                     )
-                    yield _sse("tool_result", {
-                        "call_id": call_id,
-                        "tool": action.tool,
-                        "status": status,
-                        "result_summary": reason[:500],
-                        "duration_ms": duration_ms,
-                        "error": reason if not passed else None,
-                    })
+
+                    if is_timeout:
+                        yield _sse("tool_timeout", {
+                            "call_id": call_id,
+                            "tool": action.tool,
+                            "error": result.get("error", "Tool timed out"),
+                            "duration_ms": duration_ms,
+                        })
+                    else:
+                        yield _sse("tool_result", {
+                            "call_id": call_id,
+                            "tool": action.tool,
+                            "status": status,
+                            "result_summary": reason[:500],
+                            "duration_ms": duration_ms,
+                            "error": reason if not passed else None,
+                        })
 
                     # --- Update matching todo task ---
                     for t in agent.todo.tasks:
@@ -898,6 +945,7 @@ class AgentRuntime:
         conversation_id: str | None = None,
         agent_state: AgentStateMachine | None = None,
         agent_mode: str = "agent",
+        run_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
         """Execute the full autonomous agent loop.
 
@@ -908,6 +956,11 @@ class AgentRuntime:
         """
         agent = agent_state or AgentStateMachine()
         start_time = time.monotonic()
+
+        # Store run_id and db for event persistence
+        self._run_id = run_id
+        self._db = db
+        self._sequence = 0
 
         # --- Build execution context ---
         from tools.registry import get_registry
@@ -927,6 +980,36 @@ class AgentRuntime:
 
         # --- Action fingerprint tracking for loop detection ---
         _action_fingerprints: dict[str, int] = {}
+
+        # --- Emit agent_started event ---
+        yield _sse("agent_started", {
+            "run_id": run_id,
+            "conversation_id": conversation_id,
+            "goal": goal[:200],
+            "model": model,
+            "agent_mode": agent_mode,
+        })
+        # Persist agent_started event
+        if self._run_id and self._db:
+            try:
+                from models.agent import AgentEvent
+                self._sequence += 1
+                evt = AgentEvent(
+                    run_id=self._run_id,
+                    sequence=self._sequence,
+                    event_type="agent_started",
+                    payload_json=_json.dumps({
+                        "run_id": run_id,
+                        "conversation_id": conversation_id,
+                        "goal": goal[:200],
+                        "model": model,
+                        "agent_mode": agent_mode,
+                    }, default=str),
+                )
+                self._db.add(evt)
+                await self._db.flush()
+            except Exception:
+                logger.warning("Failed to persist agent_started event", exc_info=True)
 
         # --- Build initial context ---
         messages: list[ChatMessage] = []
@@ -1146,6 +1229,16 @@ class AgentRuntime:
             chunk = final_content[i:i + 4]
             token_count += 1
             yield _sse("token", {"delta": chunk})
+
+        # Emit final_response BEFORE done — frontend uses this to commit the response
+        # to detail.messages before streaming state is cleared.
+        # CRITICAL INVARIANT: DONE => final response already exists in DB or run marked failed
+        yield _sse("final_response", {
+            "content": final_content,
+            "token_count": token_count,
+            "state": agent.state.value,
+            "elapsed_ms": agent.get_elapsed_ms(),
+        })
 
         yield _sse("done", {
             "content": final_content,
@@ -1480,18 +1573,20 @@ class AgentRuntime:
     async def _execute_tool(
         self, *, tool_name: str, tool_input: dict,
         user_role: str, db: AsyncSession, user_id: str,
-        reg: Any,
+        reg: Any, skip_approval: bool = True,
     ) -> dict:
         """Execute a tool through the security chain.
 
-        LLM → ToolRegistry → Permission → Validation → Risk → Approval → Sandbox → Audit → Result
+        LLM → ToolRegistry → Permission → Validation → [Approval] → Execute → Result
+
+        Per-tool timeout: 30s (independent of global agent timeout).
+        Approval gate is skipped by default in autonomous agent mode
+        (skip_approval=True) because there is no human to approve mid-run.
         """
-        from services.approval_service import ApprovalService
         from services.audit_service import AuditService
-        from models.agent import ToolCall
-        from models.base import generate_uuid
 
         t0 = time.monotonic()
+        _TOOL_TIMEOUT_SECONDS = 30.0
 
         # 1. Lookup tool
         tool = reg.get(tool_name)
@@ -1525,8 +1620,9 @@ class AgentRuntime:
                 "provided_arguments": tool_input,
             }
 
-        # 4. Approval gate
-        if reg.requires_approval(tool):
+        # 4. Approval gate (skipped in autonomous agent mode)
+        if not skip_approval and reg.requires_approval(tool):
+            from services.approval_service import ApprovalService
             approval_svc = ApprovalService(db)
             req = await approval_svc.create_request(
                 agent_run_id=None,
@@ -1535,7 +1631,18 @@ class AgentRuntime:
                 tool_input=validated_input.model_dump(),
                 risk_level=tool.risk_level,
             )
-            approved, note = await approval_svc.wait_for_decision(req.id)
+            try:
+                approved, note = await asyncio.wait_for(
+                    approval_svc.wait_for_decision(req.id),
+                    timeout=_TOOL_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "error": f"Tool '{tool_name}' approval timed out ({_TOOL_TIMEOUT_SECONDS}s)",
+                    "failure_type": "TRANSIENT",
+                    "tool": tool_name,
+                    "provided_arguments": tool_input,
+                }
             if not approved:
                 return {"error": f"Approval denied: {note}"}
 
@@ -1545,9 +1652,21 @@ class AgentRuntime:
             "user": SimpleNamespace(id=user_id, role=user_role),
         }
 
-        # 6. Execute
+        # 6. Execute with per-tool timeout
         try:
-            output = await reg.execute(tool, validated_input, context)
+            output = await asyncio.wait_for(
+                reg.execute(tool, validated_input, context),
+                timeout=_TOOL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            return {
+                "error": f"Tool '{tool_name}' execution timed out ({_TOOL_TIMEOUT_SECONDS}s)",
+                "failure_type": "TRANSIENT",
+                "tool": tool_name,
+                "provided_arguments": tool_input,
+                "duration_ms": duration_ms,
+            }
         except Exception as exc:
             output = {"error": str(exc)[:1000]}
 

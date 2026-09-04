@@ -23,7 +23,7 @@ class AgentRun(Base, TimestampMixin):
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, default="pending"
-    )  # pending | running | completed | failed | awaiting_approval | cancelled
+    )  # pending | running | completed | failed | awaiting_approval | cancelled | timed_out
     plan_json: Mapped[str | None] = mapped_column("plan", Text, nullable=True)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     step_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

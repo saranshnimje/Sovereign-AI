@@ -55,4 +55,28 @@ export const chatApi = {
       params: { format },
       responseType: 'blob',
     }).then((r) => r.data),
+
+  getAgentEvents: (convId: string) =>
+    api.get<{ events: AgentEventRecord[]; runs: AgentRunRecord[] }>(
+      `/chat/conversations/${convId}/agent-events`
+    ).then((r) => r.data),
+}
+
+export interface AgentEventRecord {
+  id: string
+  run_id: string
+  sequence: number
+  event_type: string
+  payload: Record<string, unknown>
+  created_at: string | null
+}
+
+export interface AgentRunRecord {
+  id: string
+  goal: string
+  status: string
+  result: string | null
+  step_count: number
+  model_name: string | null
+  created_at: string | null
 }

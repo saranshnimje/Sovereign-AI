@@ -9,7 +9,7 @@
  * 5. Chat response disappearing during/after agent streaming (THE CRITICAL BUG)
  */
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useChatStore, ActiveStream } from '../stores/chatStore'
+import { useChatStore, ActiveStream, AgentEvent } from '../stores/chatStore'
 
 describe('ChatStore - Streaming Lifecycle', () => {
   beforeEach(() => {
@@ -1269,6 +1269,187 @@ describe('ChatStore - Streaming Lifecycle', () => {
       updateStream('conv-1', { agentState: 'completed' })
 
       expect(getStream('conv-1')?.streamContent).toBe('Isolated content')
+    })
+  })
+
+  // ============================================================
+  // OBSERVABLE AGENT EXECUTION TESTS (M-S)
+  // ============================================================
+
+  describe('Durable Agent Events', () => {
+    beforeEach(() => {
+      useChatStore.setState({ activeStreams: {}, agentEvents: {} })
+    })
+
+    /**
+     * M: agentEvents state stores events durably per conversation
+     */
+    it('M1: addAgentEvent stores event in durable state', () => {
+      const { addAgentEvent, agentEvents } = useChatStore.getState()
+      const evt = {
+        id: 'evt-1', run_id: 'run-1', sequence: 1,
+        event_type: 'agent_started', payload: { goal: 'test' },
+        created_at: new Date().toISOString(),
+      }
+      addAgentEvent('conv-1', evt)
+
+      expect(useChatStore.getState().agentEvents['conv-1']).toHaveLength(1)
+      expect(useChatStore.getState().agentEvents['conv-1'][0].event_type).toBe('agent_started')
+    })
+
+    it('M2: agentEvents persist after streaming ends', () => {
+      const { startStream, updateStream, endStream, addAgentEvent } = useChatStore.getState()
+      startStream('conv-1')
+      addAgentEvent('conv-1', {
+        id: 'evt-1', run_id: 'run-1', sequence: 1,
+        event_type: 'agent_started', payload: {},
+        created_at: new Date().toISOString(),
+      })
+      endStream('conv-1')
+
+      // Events should still exist after stream ends
+      expect(useChatStore.getState().agentEvents['conv-1']).toHaveLength(1)
+    })
+
+    it('M3: setAgentEvents bulk-loads events from DB', () => {
+      const { setAgentEvents } = useChatStore.getState()
+      const events = [
+        { id: 'e1', run_id: 'r1', sequence: 1, event_type: 'agent_started', payload: {}, created_at: null },
+        { id: 'e2', run_id: 'r1', sequence: 2, event_type: 'done', payload: {}, created_at: null },
+      ]
+      setAgentEvents('conv-1', events)
+
+      expect(useChatStore.getState().agentEvents['conv-1']).toHaveLength(2)
+    })
+
+    /**
+     * N: addAgentEvent deduplicates by id
+     */
+    it('N1: addAgentEvent deduplicates by event id', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      const evt = {
+        id: 'evt-dup', run_id: 'run-1', sequence: 1,
+        event_type: 'agent_started', payload: {},
+        created_at: new Date().toISOString(),
+      }
+      addAgentEvent('conv-1', evt)
+      addAgentEvent('conv-1', evt) // Duplicate
+
+      expect(useChatStore.getState().agentEvents['conv-1']).toHaveLength(1)
+    })
+
+    it('N2: addAgentEvent allows different ids', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      addAgentEvent('conv-1', {
+        id: 'evt-1', run_id: 'r1', sequence: 1,
+        event_type: 'agent_started', payload: {},
+        created_at: null,
+      })
+      addAgentEvent('conv-1', {
+        id: 'evt-2', run_id: 'r1', sequence: 2,
+        event_type: 'done', payload: {},
+        created_at: null,
+      })
+
+      expect(useChatStore.getState().agentEvents['conv-1']).toHaveLength(2)
+    })
+
+    /**
+     * O: setAgentEvents sorts by sequence
+     */
+    it('O1: setAgentEvents sorts events by sequence number', () => {
+      const { setAgentEvents } = useChatStore.getState()
+      setAgentEvents('conv-1', [
+        { id: 'e3', run_id: 'r1', sequence: 3, event_type: 'done', payload: {}, created_at: null },
+        { id: 'e1', run_id: 'r1', sequence: 1, event_type: 'agent_started', payload: {}, created_at: null },
+        { id: 'e2', run_id: 'r1', sequence: 2, event_type: 'final_response', payload: {}, created_at: null },
+      ])
+
+      const events = useChatStore.getState().agentEvents['conv-1']
+      expect(events[0].sequence).toBe(1)
+      expect(events[1].sequence).toBe(2)
+      expect(events[2].sequence).toBe(3)
+    })
+
+    /**
+     * P: clearAgentEvents removes events for a conversation
+     */
+    it('P1: clearAgentEvents removes events for a conversation', () => {
+      const { addAgentEvent, clearAgentEvents } = useChatStore.getState()
+      addAgentEvent('conv-1', {
+        id: 'e1', run_id: 'r1', sequence: 1,
+        event_type: 'agent_started', payload: {},
+        created_at: null,
+      })
+      clearAgentEvents('conv-1')
+
+      expect(useChatStore.getState().agentEvents['conv-1']).toBeUndefined()
+    })
+
+    it('P2: clearAgentEvents does not affect other conversations', () => {
+      const { addAgentEvent, clearAgentEvents } = useChatStore.getState()
+      addAgentEvent('conv-1', {
+        id: 'e1', run_id: 'r1', sequence: 1,
+        event_type: 'agent_started', payload: {},
+        created_at: null,
+      })
+      addAgentEvent('conv-2', {
+        id: 'e2', run_id: 'r2', sequence: 1,
+        event_type: 'agent_started', payload: {},
+        created_at: null,
+      })
+      clearAgentEvents('conv-1')
+
+      expect(useChatStore.getState().agentEvents['conv-1']).toBeUndefined()
+      expect(useChatStore.getState().agentEvents['conv-2']).toHaveLength(1)
+    })
+
+    /**
+     * R: Agent events can represent final_response
+     */
+    it('R1: final_response event can be stored and retrieved', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      addAgentEvent('conv-1', {
+        id: 'evt-fr', run_id: 'run-1', sequence: 10,
+        event_type: 'final_response',
+        payload: { content: 'Hello world', state: 'completed', elapsed_ms: 1234 },
+        created_at: new Date().toISOString(),
+      })
+
+      const events = useChatStore.getState().agentEvents['conv-1']
+      expect(events).toHaveLength(1)
+      expect(events[0].event_type).toBe('final_response')
+      expect(events[0].payload.content).toBe('Hello world')
+    })
+
+    /**
+     * S: Agent events can represent done with state
+     */
+    it('S1: done event stores final state', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      addAgentEvent('conv-1', {
+        id: 'evt-done', run_id: 'run-1', sequence: 11,
+        event_type: 'done',
+        payload: { state: 'completed', token_count: 5, elapsed_ms: 2000 },
+        created_at: new Date().toISOString(),
+      })
+
+      const events = useChatStore.getState().agentEvents['conv-1']
+      expect(events[0].payload.state).toBe('completed')
+    })
+
+    it('S2: error event stores error state', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      addAgentEvent('conv-1', {
+        id: 'evt-err', run_id: 'run-1', sequence: 5,
+        event_type: 'error',
+        payload: { message: 'Timeout exceeded' },
+        created_at: new Date().toISOString(),
+      })
+
+      const events = useChatStore.getState().agentEvents['conv-1']
+      expect(events[0].event_type).toBe('error')
+      expect(events[0].payload.message).toBe('Timeout exceeded')
     })
   })
 })

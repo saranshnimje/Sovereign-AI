@@ -19,6 +19,15 @@ export interface SubAgentInfo {
   status: string
 }
 
+export interface AgentEvent {
+  id: string
+  run_id: string
+  sequence: number
+  event_type: string
+  payload: Record<string, unknown>
+  created_at: string | null
+}
+
 export interface ActiveStream {
   convId: string
   streaming: boolean
@@ -49,6 +58,12 @@ interface ChatState {
   updateStream: (convId: string, updates: Partial<Omit<ActiveStream, 'convId'>>) => void
   endStream: (convId: string) => void
   getStream: (convId: string) => ActiveStream | undefined
+
+  // Durable agent events per conversation — persists after streaming ends
+  agentEvents: Record<string, AgentEvent[]>
+  addAgentEvent: (convId: string, event: AgentEvent) => void
+  setAgentEvents: (convId: string, events: AgentEvent[]) => void
+  clearAgentEvents: (convId: string) => void
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -111,4 +126,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { activeStreams: rest }
     }),
   getStream: (convId) => get().activeStreams[convId],
+
+  // Durable agent events — survives streaming end and browser refresh
+  agentEvents: {},
+  addAgentEvent: (convId, event) =>
+    set((s) => {
+      const existing = s.agentEvents[convId] || []
+      // Deduplicate by event id
+      if (existing.some(e => e.id === event.id)) return s
+      return {
+        agentEvents: {
+          ...s.agentEvents,
+          [convId]: [...existing, event].sort((a, b) => a.sequence - b.sequence),
+        },
+      }
+    }),
+  setAgentEvents: (convId, events) =>
+    set((s) => ({
+      agentEvents: {
+        ...s.agentEvents,
+        [convId]: events.sort((a, b) => a.sequence - b.sequence),
+      },
+    })),
+  clearAgentEvents: (convId) =>
+    set((s) => {
+      const { [convId]: _, ...rest } = s.agentEvents
+      return { agentEvents: rest }
+    }),
 }))

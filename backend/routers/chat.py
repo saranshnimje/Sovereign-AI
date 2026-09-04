@@ -117,6 +117,99 @@ async def get_conversation_status(
     }
 
 
+@router.get("/conversations/{conv_id}/agent-events")
+async def get_agent_events(
+    conv_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get persisted agent execution events for a conversation.
+
+    Returns events ordered by sequence number for rendering the agent timeline.
+    """
+    from models.agent import AgentRun, AgentEvent
+    from models.conversation import Conversation
+
+    # Verify conversation ownership
+    res = await db.execute(
+        select(Conversation).where(
+            Conversation.id == conv_id, Conversation.user_id == current_user.id
+        )
+    )
+    conv = res.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(404, "Conversation not found")
+
+    # Find agent runs for this conversation (via assistant messages with run_id metadata)
+    # We join through messages to find run_ids associated with this conversation
+    from sqlalchemy.orm import selectinload
+    msg_res = await db.execute(
+        select(Msg).where(
+            Msg.conversation_id == conv_id,
+            Msg.role == "assistant",
+        )
+    )
+    messages = list(msg_res.scalars().all())
+
+    run_ids = set()
+    for msg in messages:
+        try:
+            meta = json.loads(msg.metadata_json) if msg.metadata_json else {}
+            if meta.get("run_id"):
+                run_ids.add(meta["run_id"])
+        except Exception:
+            pass
+
+    # Also check agent_runs directly
+    run_res = await db.execute(
+        select(AgentRun).where(AgentRun.user_id == current_user.id)
+    )
+    for run in run_res.scalars().all():
+        run_ids.add(run.id)
+
+    if not run_ids:
+        return {"events": [], "runs": []}
+
+    # Fetch events for all runs
+    events = []
+    for rid in run_ids:
+        evt_res = await db.execute(
+            select(AgentEvent).where(
+                AgentEvent.run_id == rid
+            ).order_by(AgentEvent.sequence)
+        )
+        for evt in evt_res.scalars().all():
+            events.append({
+                "id": evt.id,
+                "run_id": evt.run_id,
+                "sequence": evt.sequence,
+                "event_type": evt.event_type,
+                "payload": json.loads(evt.payload_json) if evt.payload_json else {},
+                "created_at": evt.created_at.isoformat() if evt.created_at else None,
+            })
+
+    # Sort by sequence across all runs
+    events.sort(key=lambda e: e["sequence"])
+
+    # Fetch run metadata
+    runs = []
+    run_res2 = await db.execute(
+        select(AgentRun).where(AgentRun.id.in_(run_ids))
+    )
+    for run in run_res2.scalars().all():
+        runs.append({
+            "id": run.id,
+            "goal": run.goal,
+            "status": run.status,
+            "result": run.result,
+            "step_count": run.step_count,
+            "model_name": run.model_name,
+            "created_at": run.created_at.isoformat() if run.created_at else None,
+        })
+
+    return {"events": events, "runs": runs}
+
+
 @router.post("/conversations/{conv_id}/messages")
 async def send_message(
     conv_id: str,
@@ -367,6 +460,18 @@ async def send_agent_message(
     # Initialize agent state
     agent = AgentStateMachine()
 
+    # Create AgentRun record for durable execution tracking
+    from models.agent import AgentRun
+    agent_run = AgentRun(
+        user_id=current_user.id,
+        goal=data.content,
+        status="running",
+        model_name=data.model_name,
+    )
+    session.add(agent_run)
+    await session.flush()
+    run_id = agent_run.id
+
     # Delegate to runtime
     from services.agent.runtime import AgentRuntime
 
@@ -375,8 +480,8 @@ async def send_agent_message(
     async def _gen():
         nonlocal tool_names
 
-        logger.info("Agent generator started: conv=%s model=%s provider_id=%s tool_mode=%s agent_mode=%s",
-                     conv_id, data.model_name, data.provider_id, tool_mode, agent_mode)
+        logger.info("Agent generator started: conv=%s run_id=%s model=%s provider_id=%s tool_mode=%s agent_mode=%s",
+                     conv_id, run_id, data.model_name, data.provider_id, tool_mode, agent_mode)
 
         full_content = ""
         async for event_str in runtime.run(
@@ -391,37 +496,62 @@ async def send_agent_message(
             conversation_id=conv_id,
             agent_state=agent,
             agent_mode=agent_mode,
+            run_id=run_id,
         ):
-            # Pass through runtime events
-            yield event_str
-
-            # Collect final content from done event
-            if event_str.startswith("event: done\n"):
+            # On final_response: persist assistant message BEFORE yielding
+            # This ensures DONE => final response already exists in DB
+            if event_str.startswith("event: final_response\n"):
                 try:
                     payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
                     full_content = payload.get("content", "")
                 except Exception:
                     pass
 
-        # Persist assistant message
-        if full_content:
-            try:
-                from services.audit_service import AuditService
-                assistant_msg = Msg(
-                    conversation_id=conv_id,
-                    role="assistant",
-                    content=full_content,
-                    metadata_json=json.dumps({
-                        "local": True, "agent": True,
-                        "state": agent.state.value,
-                        "tool_calls": agent.tool_call_count,
-                    })
-                )
-                session.add(assistant_msg)
-                await session.flush()
-                await session.commit()
-            except Exception:
-                logger.warning("Failed to persist assistant message", exc_info=True)
+                if full_content:
+                    try:
+                        assistant_msg = Msg(
+                            conversation_id=conv_id,
+                            role="assistant",
+                            content=full_content,
+                            metadata_json=json.dumps({
+                                "local": True, "agent": True,
+                                "state": agent.state.value,
+                                "tool_calls": agent.tool_call_count,
+                                "run_id": run_id,
+                            })
+                        )
+                        session.add(assistant_msg)
+                        await session.flush()
+                        await session.commit()
+                    except Exception:
+                        logger.warning("Failed to persist assistant message", exc_info=True)
+
+            # Yield event to frontend
+            yield event_str
+
+            # Collect final content from done event (fallback)
+            if event_str.startswith("event: done\n"):
+                try:
+                    payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
+                    if not full_content:
+                        full_content = payload.get("content", "")
+                except Exception:
+                    pass
+
+        # Update AgentRun status after stream completes
+        try:
+            agent_run.status = agent.state.value if agent.state.value in (
+                "completed", "failed", "cancelled", "timed_out"
+            ) else "completed"
+            agent_run.result = full_content[:10000] if full_content else None
+            agent_run.step_count = agent.tool_call_count
+            agent_run.plan_json = json.dumps([
+                {"id": s.id, "description": s.description, "status": s.status}
+                for s in agent.plan
+            ]) if agent.plan else None
+            await session.commit()
+        except Exception:
+            logger.warning("Failed to update AgentRun status", exc_info=True)
 
         # Audit log
         try:

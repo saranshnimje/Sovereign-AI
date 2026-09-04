@@ -3,7 +3,7 @@ import { useState } from 'react'
 export interface ToolCall {
   call_id: string
   tool: string
-  status: 'pending' | 'running' | 'success' | 'error' | 'denied' | 'approval_required'
+  status: 'pending' | 'running' | 'success' | 'error' | 'timeout' | 'denied' | 'approval_required'
   input_summary?: string
   result_summary?: string
   error?: string
@@ -21,6 +21,7 @@ const STATUS_CONFIG: Record<string, { icon: string; color: string; label: string
   running: { icon: '⏳', color: 'text-amber-500', label: 'Running' },
   success: { icon: '✓', color: 'text-emerald-600', label: 'Completed' },
   error: { icon: '✕', color: 'text-red-500', label: 'Failed' },
+  timeout: { icon: '⏱', color: 'text-orange-500', label: 'Timed out' },
   denied: { icon: '⊘', color: 'text-neutral-400', label: 'Denied' },
   approval_required: { icon: '⚠', color: 'text-amber-500', label: 'Approval Required' },
 }
