@@ -29,6 +29,7 @@ export default function ChatPage() {
   } = useChatStore()
 
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
+  const detailRef = useRef<ConversationDetail | null>(null)
   const [options, setOptions] = useState<ChatModelOption[]>([])
   const [activeModel, setActiveModel] = useState<ChatModelOption>({
     providerId: null, providerName: 'No Provider', modelName: 'No model available',
@@ -56,10 +57,12 @@ export default function ChatPage() {
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const streamingActiveRef = useRef<boolean>(false)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [loadingConv, setLoadingConv] = useState(false)
   const latestFetchId = useRef<string | null>(null)
+  const conversationFetchGen = useRef(0)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
 
   // Get active stream for current conversation
@@ -126,30 +129,50 @@ export default function ChatPage() {
   }, [])
 
   // Load conversation detail when convId changes
+  // NOTE: activeStreams is intentionally NOT a dependency here.
+  // Adding it would cause a getConversation fetch on every token event (since updateStream
+  // changes activeStreams reference), which would overwrite detail.messages with stale
+  // server data and cause the assistant response to disappear mid-stream.
   useEffect(() => {
     if (convId) {
       latestFetchId.current = convId
+      const gen = ++conversationFetchGen.current
       setLoadingConv(true)
       chatApi.getConversation(convId)
         .then((d) => {
           if (latestFetchId.current !== convId) return
+          if (conversationFetchGen.current !== gen) return
+          // Guard: if a stream is active for this conversation, only update detail if
+          // the server response contains an assistant message (to avoid overwriting
+          // optimistic/streaming state with stale server data)
+          // Use getState() to avoid stale closure on activeStreams
+          const currentStreams = useChatStore.getState().activeStreams
+          const stream = currentStreams[convId]
+          if (stream?.streaming) {
+            const hasAssistant = d.messages.some(m => m.role === 'assistant')
+            if (!hasAssistant) return // Don't overwrite — stream is still in progress
+          }
           setDetail(d)
+          detailRef.current = d
           setLoadingConv(false)
         })
         .catch(() => {
           if (latestFetchId.current !== convId) return
+          if (conversationFetchGen.current !== gen) return
           setLoadingConv(false)
           // Don't navigate away if there's an active stream for this conversation
-          const stream = activeStreams[convId]
+          const currentStreams = useChatStore.getState().activeStreams
+          const stream = currentStreams[convId]
           if (!stream?.streaming) {
             navigate('/chat')
           }
         })
     } else {
       setDetail(null)
+      detailRef.current = null
       setLoadingConv(false)
     }
-  }, [convId, navigate, activeStreams])
+  }, [convId, navigate]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll when messages or stream content changes
   useEffect(() => {
@@ -221,6 +244,7 @@ export default function ChatPage() {
     let evidenceReceived: CitationSource[] = []
     let tcAcc: ToolCall[] = []
     let doneProcessed = false
+    let finalAssistantContent = '' // Track final content for reconciliation
 
     // Helper to check if this stream is still the active one (filters stale events)
     const isStillActive = (): boolean => {
@@ -263,6 +287,7 @@ export default function ChatPage() {
 
           if (ev === 'token') {
             acc += d.delta
+            finalAssistantContent = acc // Track the accumulated content
             updateStream(convId, { streamContent: acc })
           } else if (ev === 'evidence') {
             evidenceReceived = d.sources || []
@@ -395,15 +420,31 @@ export default function ChatPage() {
       }
     }
 
-    // Stream complete - fetch updated conversation
-    // Only update if this stream is still active (prevents stale updates)
-    if (isStillActive() || doneProcessed) {
-      try {
-        const updated = await chatApi.getConversation(convId)
-        setDetail(updated)
-        updateConversation(convId, { title: updated.title, message_count: updated.messages.length })
-      } catch {
-        // Conversation may not exist yet or network error — ignore
+    // Stream complete — fetch updated conversation with retry for DB commit latency
+    if (doneProcessed || acc) {
+      const MAX_RETRIES = 3
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+          const updated = await chatApi.getConversation(convId)
+          const hasAssistant = updated.messages.some(m => m.role === 'assistant')
+          if (hasAssistant) {
+            setDetail(updated)
+            detailRef.current = updated
+            updateConversation(convId, { title: updated.title, message_count: updated.messages.length })
+            break
+          }
+          // If no assistant message yet and we have streamed content, wait briefly and retry
+          if (attempt < MAX_RETRIES - 1 && finalAssistantContent) {
+            await new Promise(r => setTimeout(r, 300 * (attempt + 1)))
+          } else {
+            // Last attempt — use server data even if incomplete
+            setDetail(updated)
+            detailRef.current = updated
+          }
+        } catch {
+          // Network error — keep current detail state
+          break
+        }
       }
     }
   }, [updateStream, getStream, addToast, setDetail, updateConversation])
@@ -420,13 +461,16 @@ export default function ChatPage() {
       const conv = await chatApi.createConversation({ model_name: model.modelName, title: text.slice(0, 80) })
       currentConvId = conv.id
       addConversation(conv)
-      navigate(`/chat/${conv.id}`, { replace: true })
     }
 
-    // Start stream in store (persists across navigations)
+    // Start stream in store BEFORE navigate so the streaming guard in the
+    // conversation detail useEffect protects optimistic state from being overwritten.
+    // With the merged route (<Route path="/chat/:convId?">), navigate does NOT cause
+    // a remount, so setDetail in this closure remains valid.
     const controller = new AbortController()
     const stream = startStream(currentConvId)
     const runId = stream.runId
+    streamingActiveRef.current = true
     updateStream(currentConvId, {
       streaming: true,
       streamContent: '',
@@ -457,6 +501,9 @@ export default function ChatPage() {
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
         message_count: 1, messages: [userMsg],
       })
+      // Navigate AFTER stream is started and optimistic state is set.
+      // With merged route, this updates the URL param without remounting.
+      navigate(`/chat/${currentConvId}`, { replace: true })
     }
 
     prefsApi.set(model.providerId, model.modelName).catch(() => {})
@@ -551,13 +598,10 @@ export default function ChatPage() {
       })
       setRetryData({ convId: currentConvId!, text, model })
       addToast({ type: 'error', title: 'Send failed', message: err?.message })
-      // Refetch conversation to sync state (removes optimistic message if server didn't save it)
-      try {
-        const updated = await chatApi.getConversation(currentConvId!)
-        setDetail(updated)
-        updateConversation(currentConvId!, { title: updated.title, message_count: updated.messages.length })
-      } catch { /* conversation may not exist yet */ }
+      // NOTE: Do NOT fetch conversation on error — the optimistic user message
+      // should remain visible with the error state. The user can retry.
     } finally {
+      streamingActiveRef.current = false
       // Only end stream if this is still the active run
       const currentStream = getStream(currentConvId!)
       if (currentStream?.runId === runId) {

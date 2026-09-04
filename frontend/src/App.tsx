@@ -114,8 +114,7 @@ export default function App() {
             }
           >
             <Route path="/" element={<DashboardPage />} />
-            <Route path="/chat" element={<ChatPage />} />
-            <Route path="/chat/:convId" element={<ChatPage />} />
+            <Route path="/chat/:convId?" element={<ChatPage />} />
             <Route path="/knowledge" element={<KnowledgeBasesPage />} />
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/models" element={<ModelsPage />} />
