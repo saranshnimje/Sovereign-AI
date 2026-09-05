@@ -152,6 +152,8 @@ class AgentEvent(BaseModel):
 
 def parse_llm_json(text: str) -> dict[str, Any]:
     """Extract JSON from LLM response. Handles markdown fences, prose wrapping."""
+    if not text:
+        return {"type": "error", "message": "Empty or None response from LLM"}
     text = re.sub(r"```(?:json)?\n?", "", text)
     text = re.sub(r"```\n?", "", text)
     m = re.search(r"\{.*\}", text, re.DOTALL)

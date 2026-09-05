@@ -322,7 +322,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         msg = choice.get("message", {})
         usage = data.get("usage", {})
         return ChatResponse(
-            content=msg.get("content", ""),
+            content=msg.get("content") or "",
             model=data.get("model", model),
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),

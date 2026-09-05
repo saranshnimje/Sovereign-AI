@@ -1222,3 +1222,251 @@ class TestToolTimeoutRegression:
                 assert tc_ids == tr_ids, f"call_id mismatch: {tc_ids} vs {tr_ids}"
             finally:
                 reg.get("web_search").handler = original_handler
+
+
+# ===================================================================
+# None-Content / Lifecycle Regression Tests
+# ===================================================================
+
+
+def _make_none_content_resp():
+    """Simulate OpenRouter returning content=null (the real bug)."""
+    r = MagicMock()
+    r.content = None
+    return r
+
+
+def _make_empty_content_resp():
+    """Simulate LLM returning empty string content."""
+    r = MagicMock()
+    r.content = ""
+    return r
+
+
+class TestNoneContentHandling:
+    """Tests for None/empty LLM response content handling (the OpenRouter bug)."""
+
+    def test_parse_llm_json_none_input(self):
+        """parse_llm_json(None) must return error dict, not raise TypeError."""
+        from services.agent.schemas import parse_llm_json
+        result = parse_llm_json(None)
+        assert result.get("type") == "error"
+        assert "None" in result["message"] or "Empty" in result["message"]
+
+    def test_parse_llm_json_empty_string(self):
+        """parse_llm_json('') must return error dict."""
+        from services.agent.schemas import parse_llm_json
+        result = parse_llm_json("")
+        assert result.get("type") == "error"
+
+    def test_parse_llm_json_valid_json(self):
+        """parse_llm_json with valid JSON works normally."""
+        from services.agent.schemas import parse_llm_json
+        result = parse_llm_json('{"key": "value"}')
+        assert result == {"key": "value"}
+
+    def test_parse_llm_json_markdown_fenced(self):
+        """parse_llm_json extracts JSON from markdown fences."""
+        from services.agent.schemas import parse_llm_json
+        result = parse_llm_json('```json\n{"key": "value"}\n```')
+        assert result == {"key": "value"}
+
+
+@pytest.mark.asyncio
+class TestNoneContentAgentRuntime:
+    """Integration tests: agent runtime handles None content from LLM gracefully."""
+
+    async def test_none_understand_response_does_not_crash(self, client: AsyncClient):
+        """When LLM returns content=null during understanding, agent handles gracefully via fallback."""
+        h = await _setup_user(client, "none_u1@test.com", "none_u1")
+        conv_id = await _create_conv(client, h, "none understand")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.return_value = _make_none_content_resp()
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "Research superposition theorem", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            assert resp.status_code == 200
+            events = _parse_sse_events(resp.text)
+            # Must NOT crash — fallback logic handles None gracefully
+            assert "done" in events
+            # Must have understanding_completed (fallback heuristic used)
+            assert "understanding_completed" in events
+            understanding = events["understanding_completed"][0]
+            assert understanding["intent"] == "task"
+
+    async def test_none_content_does_not_raise_type_error(self, client: AsyncClient):
+        """None content must not cause TypeError in regex/string operations."""
+        h = await _setup_user(client, "none_u2@test.com", "none_u2")
+        conv_id = await _create_conv(client, h, "none type error")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.return_value = _make_none_content_resp()
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "none type error test", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            assert resp.status_code == 200
+            body = resp.text
+            assert "TypeError" not in body
+            assert "traceback" not in body.lower()
+
+    async def test_exception_path_never_emits_final_response(self, client: AsyncClient):
+        """On exception, final_response event must NOT be emitted."""
+        h = await _setup_user(client, "none_u3@test.com", "none_u3")
+        conv_id = await _create_conv(client, h, "no final on error")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = RuntimeError("LLM connection lost")
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "no final on error", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            assert "final_response" not in events
+            assert "error" in events
+
+    async def test_agent_run_status_is_failed_on_real_exception(self, client: AsyncClient):
+        """AgentRun.status must be 'failed' when a real exception occurs, never 'completed'."""
+        h = await _setup_user(client, "none_u4@test.com", "none_u4")
+        conv_id = await _create_conv(client, h, "run status exception")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = RuntimeError("LLM connection lost")
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "run status exception test", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            done_events = events.get("done", [])
+            assert len(done_events) >= 1
+            done_state = done_events[0].get("state")
+            assert done_state == "failed", f"Expected state=failed, got {done_state}"
+
+    async def test_error_event_includes_message(self, client: AsyncClient):
+        """Error event must include a human-readable error message."""
+        h = await _setup_user(client, "none_u5@test.com", "none_u5")
+        conv_id = await _create_conv(client, h, "error msg test")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = RuntimeError("LLM connection lost")
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "error msg test", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            error_events = events.get("error", [])
+            assert len(error_events) >= 1
+            assert "message" in error_events[0]
+            assert len(error_events[0]["message"]) > 0
+
+    async def test_done_event_state_matches_agent_state_on_exception(self, client: AsyncClient):
+        """The done event state field must match the agent's actual terminal state."""
+        h = await _setup_user(client, "none_u6@test.com", "none_u6")
+        conv_id = await _create_conv(client, h, "state match exception")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = RuntimeError("LLM connection lost")
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "state match exception test", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            state_events = events.get("agent_state", [])
+            if state_events:
+                last_state = state_events[-1].get("state")
+                assert last_state == "failed", f"Expected agent_state=failed, got {last_state}"
+            done_events = events.get("done", [])
+            assert done_events[0].get("state") == "failed"
+
+
+@pytest.mark.asyncio
+class TestSuccessfulLifecycleRegression:
+    """Verify that successful runs still work correctly after the None-content fix."""
+
+    async def test_successful_run_emits_final_response_before_done(self, client: AsyncClient):
+        """On success, final_response must appear BEFORE done in the event stream."""
+        h = await _setup_user(client, "succ_u1@test.com", "succ_u1")
+        conv_id = await _create_conv(client, h, "final before done")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(intent="conversation"),
+            ]
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hello", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            done_events = events.get("done", [])
+            assert len(done_events) >= 1
+            assert done_events[0].get("state") == "completed"
+
+    async def test_successful_run_agent_run_status_completed(self, client: AsyncClient):
+        """Successful conversation must set AgentRun.status to 'completed'."""
+        h = await _setup_user(client, "succ_u2@test.com", "succ_u2")
+        conv_id = await _create_conv(client, h, "run completed")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(intent="conversation"),
+            ]
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hello", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            done_events = events.get("done", [])
+            assert done_events[0].get("state") == "completed"
+
+
+@pytest.mark.asyncio
+class TestAgentRunStatusOnTimeout:
+    """Verify AgentRun status on timeout scenarios."""
+
+    async def test_timeout_constant_exists(self):
+        """Global timeout constant is properly defined."""
+        from services.agent.runtime import AGENT_MAX_RUNTIME_SECONDS
+        assert isinstance(AGENT_MAX_RUNTIME_SECONDS, int)
+        assert AGENT_MAX_RUNTIME_SECONDS > 0

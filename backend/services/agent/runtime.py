@@ -262,7 +262,7 @@ class AgentRuntime:
                 ),
                 timeout=30.0,  # Understanding must be fast
             )
-            text = resp.content if hasattr(resp, "content") else str(resp)
+            text = (resp.content or "") if hasattr(resp, "content") else str(resp)
         except (asyncio.TimeoutError, ModelUnavailableError, Exception) as exc:
             logger.warning("Understanding failed, defaulting to TASK: %s", exc)
             # Conservative fallback: treat as task (will create plan)
@@ -401,7 +401,7 @@ class AgentRuntime:
                 ),
                 timeout=60.0,
             )
-            return resp.content if hasattr(resp, "content") else str(resp)
+            return (resp.content or "") if hasattr(resp, "content") else str(resp)
         except Exception as exc:
             logger.warning("Knowledge response failed: %s", exc)
             return f"I understand you're asking about: {goal}. I'm having trouble generating a response right now."
@@ -648,6 +648,20 @@ class AgentRuntime:
                         agent.fail("Reasoner returned CONTINUE/RETRY without next_action")
                         yield _sse("agent_state", agent.to_dict())
                         yield _sse("error", {"message": "No action provided"})
+                        yield _sse("done", {
+                            "content": final_content,
+                            "token_count": 0,
+                            "activity": agent.activity,
+                            "tool_calls": agent.tool_call_count,
+                            "state": agent.state.value,
+                            "elapsed_ms": agent.get_elapsed_ms(),
+                            "plan": [
+                                {"id": s.id, "description": s.description, "status": s.status}
+                                for s in agent.plan
+                            ],
+                            "observations": [],
+                            "verification": None,
+                        })
                         _result[0] = final_content
                         return
 
@@ -928,6 +942,20 @@ class AgentRuntime:
             agent.fail("Max iterations reached")
             yield _sse("agent_state", agent.to_dict())
             yield _sse("error", {"message": "Max iterations reached"})
+            yield _sse("done", {
+                "content": final_content,
+                "token_count": 0,
+                "activity": agent.activity,
+                "tool_calls": agent.tool_call_count,
+                "state": agent.state.value,
+                "elapsed_ms": agent.get_elapsed_ms(),
+                "plan": [
+                    {"id": s.id, "description": s.description, "status": s.status}
+                    for s in agent.plan
+                ],
+                "observations": [],
+                "verification": None,
+            })
 
         _result[0] = final_content
 
@@ -1224,6 +1252,13 @@ class AgentRuntime:
             return
 
         # === FINALIZE ===
+        # If the agent is in a terminal failure state (failed, cancelled, timed_out),
+        # the appropriate done/error events were already emitted by the specific code path
+        # (exception handler, FAIL case, timeout handler, etc.).
+        # Only emit final_response + done for successful completions.
+        if agent.state.value in ("failed", "cancelled"):
+            return
+
         # Stream final answer as tokens
         for i in range(0, len(final_content), 4):
             chunk = final_content[i:i + 4]
@@ -1287,7 +1322,7 @@ class AgentRuntime:
                 ),
                 timeout=_TIMEOUT_PLANNER,
             )
-            text = resp.content if hasattr(resp, "content") else str(resp)
+            text = (resp.content or "") if hasattr(resp, "content") else str(resp)
         except (asyncio.TimeoutError, ModelUnavailableError, Exception) as exc:
             logger.warning("Planning failed: %s", exc)
             return None
@@ -1381,7 +1416,7 @@ class AgentRuntime:
                 ),
                 timeout=_TIMEOUT_REASONER,
             )
-            text = resp.content if hasattr(resp, "content") else str(resp)
+            text = (resp.content or "") if hasattr(resp, "content") else str(resp)
         except (asyncio.TimeoutError, ModelUnavailableError, Exception) as exc:
             logger.warning("Reasoning failed: %s", exc)
             return AgentDecision(decision="FAIL", reason=f"LLM error: {exc}")
@@ -1459,7 +1494,7 @@ class AgentRuntime:
                 ),
                 timeout=_TIMEOUT_VERIFIER,
             )
-            text = resp.content if hasattr(resp, "content") else str(resp)
+            text = (resp.content or "") if hasattr(resp, "content") else str(resp)
         except (asyncio.TimeoutError, ModelUnavailableError, Exception) as exc:
             logger.warning("Verification failed: %s", exc)
             return VerificationResult(
@@ -1552,7 +1587,7 @@ class AgentRuntime:
                 ),
                 timeout=_TIMEOUT_REPLANNER,
             )
-            text = resp.content if hasattr(resp, "content") else str(resp)
+            text = (resp.content or "") if hasattr(resp, "content") else str(resp)
         except (asyncio.TimeoutError, ModelUnavailableError, Exception) as exc:
             logger.warning("Replanning failed: %s", exc)
             return None

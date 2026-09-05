@@ -1452,4 +1452,159 @@ describe('ChatStore - Streaming Lifecycle', () => {
       expect(events[0].payload.message).toBe('Timeout exceeded')
     })
   })
+
+  describe('Agent Event Lifecycle - Failed State Regression', () => {
+    beforeEach(() => {
+      useChatStore.setState({
+        agentEvents: {},
+        activeStreams: {},
+      })
+    })
+
+    it('done event with state=failed preserves failed state in payload', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      addAgentEvent('conv-fail', {
+        id: 'evt-start', run_id: 'run-f1', sequence: 1,
+        event_type: 'agent_started',
+        payload: { goal: 'test', model: 'test' },
+        created_at: new Date().toISOString(),
+      })
+      addAgentEvent('conv-fail', {
+        id: 'evt-err', run_id: 'run-f1', sequence: 2,
+        event_type: 'error',
+        payload: { message: 'Agent error: expected string or bytes-like object' },
+        created_at: new Date().toISOString(),
+      })
+      addAgentEvent('conv-fail', {
+        id: 'evt-done', run_id: 'run-f1', sequence: 3,
+        event_type: 'done',
+        payload: {
+          state: 'failed',
+          content: '',
+          token_count: 0,
+          activity: '',
+          tool_calls: 0,
+          elapsed_ms: 100,
+          plan: [],
+          observations: [],
+          verification: null,
+        },
+        created_at: new Date().toISOString(),
+      })
+
+      const events = useChatStore.getState().agentEvents['conv-fail']
+      expect(events).toHaveLength(3)
+
+      const doneEvent = events.find(e => e.event_type === 'done')
+      expect(doneEvent).toBeDefined()
+      expect(doneEvent!.payload.state).toBe('failed')
+    })
+
+    it('done event with state=completed preserves completed state', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      addAgentEvent('conv-ok', {
+        id: 'evt-start', run_id: 'run-ok', sequence: 1,
+        event_type: 'agent_started',
+        payload: { goal: 'test', model: 'test' },
+        created_at: new Date().toISOString(),
+      })
+      addAgentEvent('conv-ok', {
+        id: 'evt-done', run_id: 'run-ok', sequence: 2,
+        event_type: 'done',
+        payload: {
+          state: 'completed',
+          content: 'Task completed successfully.',
+          token_count: 10,
+          activity: '',
+          tool_calls: 0,
+          elapsed_ms: 500,
+          plan: [],
+          observations: [],
+          verification: null,
+        },
+        created_at: new Date().toISOString(),
+      })
+
+      const events = useChatStore.getState().agentEvents['conv-ok']
+      const doneEvent = events.find(e => e.event_type === 'done')
+      expect(doneEvent!.payload.state).toBe('completed')
+    })
+
+    it('done event with state=timed_out preserves timed_out state', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      addAgentEvent('conv-timeout', {
+        id: 'evt-done', run_id: 'run-t1', sequence: 1,
+        event_type: 'done',
+        payload: {
+          state: 'timed_out',
+          content: '',
+          token_count: 0,
+          activity: '',
+          tool_calls: 5,
+          elapsed_ms: 300000,
+          plan: [],
+          observations: [],
+          verification: null,
+        },
+        created_at: new Date().toISOString(),
+      })
+
+      const events = useChatStore.getState().agentEvents['conv-timeout']
+      const doneEvent = events.find(e => e.event_type === 'done')
+      expect(doneEvent!.payload.state).toBe('timed_out')
+    })
+
+    it('error event before done does not overwrite done state', () => {
+      const { addAgentEvent } = useChatStore.getState()
+      addAgentEvent('conv-seq', {
+        id: 'evt-start', run_id: 'run-s1', sequence: 1,
+        event_type: 'agent_started',
+        payload: { goal: 'test' },
+        created_at: new Date().toISOString(),
+      })
+      addAgentEvent('conv-seq', {
+        id: 'evt-err', run_id: 'run-s1', sequence: 2,
+        event_type: 'error',
+        payload: { message: 'Error occurred' },
+        created_at: new Date().toISOString(),
+      })
+      addAgentEvent('conv-seq', {
+        id: 'evt-done', run_id: 'run-s1', sequence: 3,
+        event_type: 'done',
+        payload: { state: 'failed', content: '' },
+        created_at: new Date().toISOString(),
+      })
+
+      const events = useChatStore.getState().agentEvents['conv-seq']
+      // Timeline rendering logic: findLast done event
+      const doneEvent = [...events].reverse().find(e => e.event_type === 'done')
+      expect(doneEvent!.payload.state).toBe('failed')
+
+      // Header badge logic: hasError if any error event exists
+      const hasError = events.some(e => e.event_type === 'error')
+      expect(hasError).toBe(true)
+
+      // isComplete should be false (state is failed, not completed)
+      const isComplete = doneEvent!.payload.state === 'completed'
+      expect(isComplete).toBe(false)
+
+      // isFailed should be true
+      const isFailed = doneEvent!.payload.state === 'failed'
+      expect(isFailed).toBe(true)
+    })
+
+    it('clearAgentEvents removes all events for a conversation', () => {
+      const { addAgentEvent, clearAgentEvents } = useChatStore.getState()
+      addAgentEvent('conv-clear', {
+        id: 'evt-1', run_id: 'run-1', sequence: 1,
+        event_type: 'agent_started',
+        payload: { goal: 'test' },
+        created_at: new Date().toISOString(),
+      })
+
+      expect(useChatStore.getState().agentEvents['conv-clear']).toHaveLength(1)
+      clearAgentEvents('conv-clear')
+      expect(useChatStore.getState().agentEvents['conv-clear']).toBeUndefined()
+    })
+  })
 })

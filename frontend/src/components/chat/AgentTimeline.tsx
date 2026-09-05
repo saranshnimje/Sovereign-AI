@@ -65,11 +65,14 @@ export default function AgentTimeline({ events, isStreaming }: AgentTimelineProp
     })
   }
 
-  // Get the final status from done/error/cancelled events
-  const lastEvent = timelineEvents[timelineEvents.length - 1]
-  const isComplete = lastEvent?.event_type === 'done'
-  const isError = lastEvent?.event_type === 'error'
-  const isCancelled = lastEvent?.event_type === 'cancelled'
+  // Determine terminal status from the done event's payload state
+  const doneEvents = timelineEvents.filter(e => e.event_type === 'done')
+  const doneEvent = doneEvents.length > 0 ? doneEvents[doneEvents.length - 1] : undefined
+  const doneState = doneEvent?.payload?.state as string | undefined
+  const hasError = timelineEvents.some(e => e.event_type === 'error')
+  const isCancelled = timelineEvents.some(e => e.event_type === 'cancelled')
+  const isComplete = doneState === 'completed'
+  const isFailed = doneState === 'failed' || doneState === 'timed_out' || hasError
 
   return (
     <div className="rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/50 overflow-hidden mb-3">
@@ -86,7 +89,7 @@ export default function AgentTimeline({ events, isStreaming }: AgentTimelineProp
             <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
           )}
           {isComplete && <span className="text-emerald-400">✓</span>}
-          {isError && <span className="text-red-400">✕</span>}
+          {isFailed && <span className="text-red-400">✕</span>}
           {isCancelled && <span className="text-neutral-400">■</span>}
         </span>
         <span className="text-neutral-400">{expanded ? '▾' : '▸'}</span>
@@ -99,6 +102,25 @@ export default function AgentTimeline({ events, isStreaming }: AgentTimelineProp
             const cfg = EVENT_CONFIG[event.event_type] || {
               icon: '⚙️', color: 'text-neutral-500', label: event.event_type,
             }
+            // Override done event label based on payload state
+            const displayCfg = event.event_type === 'done'
+              ? {
+                  ...cfg,
+                  icon: event.payload?.state === 'failed' || event.payload?.state === 'timed_out' ? '✕' : '✓',
+                  color: event.payload?.state === 'failed' || event.payload?.state === 'timed_out'
+                    ? 'text-red-400'
+                    : event.payload?.state === 'cancelled'
+                      ? 'text-neutral-400'
+                      : 'text-emerald-400',
+                  label: event.payload?.state === 'failed'
+                    ? 'Failed'
+                    : event.payload?.state === 'timed_out'
+                      ? 'Timed out'
+                      : event.payload?.state === 'cancelled'
+                        ? 'Cancelled'
+                        : 'Completed',
+                }
+              : cfg
             const isExpanded = expandedEvents.has(event.id)
 
             return (
@@ -107,8 +129,8 @@ export default function AgentTimeline({ events, isStreaming }: AgentTimelineProp
                   onClick={() => toggleEvent(event.id)}
                   className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] hover:bg-neutral-100 dark:hover:bg-neutral-700/50 transition-colors text-left"
                 >
-                  <span className={cfg.color}>{cfg.icon}</span>
-                  <span className={`font-medium ${cfg.color}`}>{cfg.label}</span>
+                  <span className={displayCfg.color}>{displayCfg.icon}</span>
+                  <span className={`font-medium ${displayCfg.color}`}>{displayCfg.label}</span>
                   <span className="text-neutral-500 flex-1 truncate">
                     {event.payload?.goal
                       ? String(event.payload.goal).slice(0, 60)
