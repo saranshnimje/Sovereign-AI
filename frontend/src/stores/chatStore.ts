@@ -132,8 +132,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   addAgentEvent: (convId, event) =>
     set((s) => {
       const existing = s.agentEvents[convId] || []
-      // Deduplicate by event id
-      if (existing.some(e => e.id === event.id)) return s
+      // TASK 4: Deduplicate by (run_id, sequence) not by id.
+      // Live events use id="evt-{runId}-{seq}", persisted events use DB UUIDs.
+      // Using (run_id, sequence) ensures they collapse correctly.
+      if (existing.some(e => e.run_id === event.run_id && e.sequence === event.sequence)) return s
       return {
         agentEvents: {
           ...s.agentEvents,
@@ -142,12 +144,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }),
   setAgentEvents: (convId, events) =>
-    set((s) => ({
-      agentEvents: {
-        ...s.agentEvents,
-        [convId]: events.sort((a, b) => a.sequence - b.sequence),
-      },
-    })),
+    set((s) => {
+      // TASK 4: Merge persisted events with existing live events instead of
+      // replacing. Live events (from SSE) may have different ids than persisted
+      // events (from DB), so we merge by (run_id, sequence) key.
+      const existing = s.agentEvents[convId] || []
+      if (existing.length === 0) {
+        return {
+          agentEvents: {
+            ...s.agentEvents,
+            [convId]: events.sort((a, b) => a.sequence - b.sequence),
+          },
+        }
+      }
+      // Build a map of existing events keyed by (run_id, sequence)
+      const merged = new Map<string, typeof events[0]>()
+      for (const e of existing) {
+        merged.set(`${e.run_id}::${e.sequence}`, e)
+      }
+      // Persisted events fill gaps but don't overwrite live events
+      for (const e of events) {
+        const key = `${e.run_id}::${e.sequence}`
+        if (!merged.has(key)) {
+          merged.set(key, e)
+        }
+      }
+      return {
+        agentEvents: {
+          ...s.agentEvents,
+          [convId]: Array.from(merged.values()).sort((a, b) => a.sequence - b.sequence),
+        },
+      }
+    }),
   clearAgentEvents: (convId) =>
     set((s) => {
       const { [convId]: _, ...rest } = s.agentEvents

@@ -93,6 +93,14 @@ _TIMEOUT_REPLANNER = 60.0
 # Loop detection: fingerprint threshold
 _LOOP_DETECTION_THRESHOLD = 3
 
+# Events that should be persisted to DB for durable execution timeline
+_PERSIST_EVENT_TYPES = frozenset({
+    "agent_started", "plan_created", "plan_updated",
+    "tool_call", "tool_result", "tool_timeout", "tool_error",
+    "observation", "verification", "verification_passed", "verification_failed",
+    "final_response", "done", "error", "cancelled",
+})
+
 
 def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {_json.dumps(payload)}\n\n"
@@ -765,45 +773,71 @@ class AgentRuntime:
                         "reasoning": action.reasoning[:200],
                     })
 
-                    result = await self._execute_tool(
-                        tool_name=action.tool, tool_input=action.input,
-                        user_role=user_role, db=db, user_id=user_id, reg=reg, llm=llm,
-                    )
+                    # TASK 3: Guarantee exactly one terminal event per tool_call.
+                    # Wrap in try/except so even if _execute_tool or processing
+                    # raises, we emit tool_failed instead of leaving RUNNING.
+                    _tool_terminal_emitted = False
+                    try:
+                        result = await self._execute_tool(
+                            tool_name=action.tool, tool_input=action.input,
+                            user_role=user_role, db=db, user_id=user_id, reg=reg, llm=llm,
+                        )
 
-                    # Objective verification
-                    passed, reason = _verify_tool_result(action.tool, result)
-                    status = "success" if passed else "failed"
-                    duration_ms = result.get("duration_ms", 0)
+                        # Objective verification
+                        passed, reason = _verify_tool_result(action.tool, result)
+                        status = "success" if passed else "failed"
+                        duration_ms = result.get("duration_ms", 0)
 
-                    # Detect timeout vs other failure
-                    is_timeout = (
-                        not passed
-                        and result.get("failure_type") == "TRANSIENT"
-                        and "timed out" in (result.get("error") or "").lower()
-                    )
+                        # Detect timeout vs other failure
+                        is_timeout = (
+                            not passed
+                            and result.get("failure_type") == "TRANSIENT"
+                            and "timed out" in (result.get("error") or "").lower()
+                        )
 
-                    agent.record_tool_result(
-                        action.tool, call_id, status,
-                        reason[:200], duration_ms,
-                        error=reason if not passed else None,
-                    )
+                        agent.record_tool_result(
+                            action.tool, call_id, status,
+                            reason[:200], duration_ms,
+                            error=reason if not passed else None,
+                        )
 
-                    if is_timeout:
-                        yield _sse("tool_timeout", {
-                            "call_id": call_id,
-                            "tool": action.tool,
-                            "error": result.get("error", "Tool timed out"),
-                            "duration_ms": duration_ms,
-                        })
-                    else:
-                        yield _sse("tool_result", {
-                            "call_id": call_id,
-                            "tool": action.tool,
-                            "status": status,
-                            "result_summary": reason[:500],
-                            "duration_ms": duration_ms,
-                            "error": reason if not passed else None,
-                        })
+                        if is_timeout:
+                            yield _sse("tool_timeout", {
+                                "call_id": call_id,
+                                "tool": action.tool,
+                                "error": result.get("error", "Tool timed out"),
+                                "duration_ms": duration_ms,
+                            })
+                        else:
+                            yield _sse("tool_result", {
+                                "call_id": call_id,
+                                "tool": action.tool,
+                                "status": status,
+                                "result_summary": reason[:500],
+                                "duration_ms": duration_ms,
+                                "error": reason if not passed else None,
+                            })
+                        _tool_terminal_emitted = True
+                    except Exception as exc:
+                        # Safety net: if anything between tool_call and terminal
+                        # event raises, emit tool_failed so the tool is never
+                        # left permanently RUNNING.
+                        if not _tool_terminal_emitted:
+                            duration_ms = int((time.monotonic() - start_time) * 1000)
+                            agent.record_tool_result(
+                                action.tool, call_id, "error",
+                                str(exc)[:200], duration_ms, error=str(exc)[:200],
+                            )
+                            yield _sse("tool_result", {
+                                "call_id": call_id,
+                                "tool": action.tool,
+                                "status": "error",
+                                "result_summary": str(exc)[:500],
+                                "duration_ms": duration_ms,
+                                "error": str(exc)[:200],
+                            })
+                            _tool_terminal_emitted = True
+                        raise  # Re-raise to outer exception handler
 
                     # --- Update matching todo task ---
                     for t in agent.todo.tasks:
@@ -861,6 +895,23 @@ class AgentRuntime:
                             "error": reason[:300],
                             "failure_type": failure_type,
                         })
+
+                        # TASK 2: When a tool fails because a required field is missing
+                        # and we cannot provide it (e.g. search_kb without kb_id), mark
+                        # the tool as permanently blocked for this run so the reasoner
+                        # stops selecting it. This prevents infinite retry loops.
+                        err_lower = (result.get("error") or "").lower()
+                        if failure_type == "INVALID_TOOL_ARGUMENTS" and (
+                            "required" in err_lower or "missing" in err_lower
+                        ):
+                            # Remove from tool_names so reasoner no longer sees it
+                            if action.tool in tool_names:
+                                tool_names = [t for t in tool_names if t != action.tool]
+                                logger.info(
+                                    "Tool %s permanently blocked: required field missing (%s)",
+                                    action.tool, err_lower[:100],
+                                )
+                            failed_attempts[-1]["failure_type"] = "TOOL_UNAVAILABLE"
 
                         if failure_type == "FATAL":
                             agent.fail(f"Fatal error: {reason[:200]}")

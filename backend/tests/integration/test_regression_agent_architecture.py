@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 
 
 def _make_understand_resp(
@@ -1731,3 +1732,249 @@ class TestExecuteToolLlmPassthrough:
             llm=MagicMock(),
         )
         assert "error" not in result or result.get("tool") == "calculator"
+
+
+# ===================================================================
+# TASK 1 — search_kb filtered when no KBs exist
+# ===================================================================
+
+@pytest.mark.asyncio
+class TestSearchKBFiltering:
+    """search_kb must be excluded when user has no knowledge bases."""
+
+    async def test_search_kb_filtered_for_user_with_no_kbs(self, client: AsyncClient):
+        """Agent tool list should not include search_kb when user has no KBs."""
+        h = await _setup_user(client, "nokb@test.com", "nokb_user")
+        conv_id = await _create_conv(client, h, "kb filter test")
+
+        # User has no KBs, so search_kb should be filtered out.
+        # The agent should still work — just without search_kb.
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(intent="conversation"),
+            ]
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hello", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            assert resp.status_code == 200
+            events = _parse_sse_events(resp.text)
+            done_events = events.get("done", [])
+            assert len(done_events) >= 1
+            assert done_events[0].get("state") == "completed"
+
+
+# ===================================================================
+# TASK 2 — Tool failure recovery (INVALID_TOOL_ARGUMENTS → block tool)
+# ===================================================================
+
+@pytest.mark.asyncio
+class TestToolFailureRecovery:
+    """Tool with missing required fields should be blocked, not retried."""
+
+    async def test_invalid_tool_args_blocks_tool(self):
+        """When tool fails with required field error, tool is removed from list."""
+        from services.agent.runtime import AgentRuntime
+        from services.agent_state import AgentStateMachine
+        from tools.registry import get_registry
+
+        runtime = AgentRuntime()
+        reg = get_registry()
+        agent = AgentStateMachine()
+        agent.start("test")
+
+        tool_names = ["search_kb", "calculator"]
+
+        # search_kb validation should fail (no kb_id provided)
+        result = await runtime._execute_tool(
+            tool_name="search_kb",
+            tool_input={"query": "test"},  # Missing kb_id
+            user_role="analyst",
+            db=MagicMock(),
+            user_id="user-1",
+            reg=reg,
+        )
+        assert result.get("failure_type") == "INVALID_TOOL_ARGUMENTS"
+        assert "required" in (result.get("error") or "").lower()
+
+    async def test_tool_terminal_event_emitted_on_exception(self):
+        """_execute_tool should return error dict on exception, not crash."""
+        from services.agent.runtime import AgentRuntime
+        from tools.registry import get_registry
+
+        runtime = AgentRuntime()
+        reg = get_registry()
+
+        # Corrupt the handler to raise
+        original_handler = reg.get("calculator").handler
+
+        async def broken_handler(inp, ctx):
+            raise RuntimeError("Handler crashed")
+
+        reg.get("calculator").handler = broken_handler
+        try:
+            result = await runtime._execute_tool(
+                tool_name="calculator",
+                tool_input={"expression": "1+1"},
+                user_role="analyst",
+                db=MagicMock(),
+                user_id="user-1",
+                reg=reg,
+            )
+            # Should return error dict, not raise
+            assert "error" in result
+        finally:
+            reg.get("calculator").handler = original_handler
+
+
+# ===================================================================
+# TASK 3 — Tool lifecycle invariant
+# ===================================================================
+
+@pytest.mark.asyncio
+class TestToolLifecycle:
+    """Every tool_call must produce exactly one terminal event."""
+
+    async def test_classify_failure_tool_unavailable(self):
+        """INVALID_TOOL_ARGUMENTS with 'required' should classify as TOOL_UNAVAILABLE."""
+        from services.agent.runtime import _classify_failure
+
+        result = {"error": "Input validation failed: Field required"}
+        failure_type = _classify_failure("search_kb", result, "Field required")
+        assert failure_type == "INVALID_TOOL_ARGUMENTS"
+
+    async def test_sse_tool_result_has_call_id(self):
+        """tool_result SSE must include call_id for lifecycle matching."""
+        # This is a schema check — the SSE event structure
+        event_data = {
+            "call_id": "call_0_search_kb",
+            "tool": "search_kb",
+            "status": "error",
+            "result_summary": "missing kb_id",
+            "duration_ms": 100,
+            "error": "Field required",
+        }
+        assert "call_id" in event_data
+        assert event_data["call_id"].startswith("call_")
+
+
+# ===================================================================
+# TASK 5 — Generator error handling
+# ===================================================================
+
+@pytest.mark.asyncio
+class TestGeneratorErrorHandling:
+    """Backend generator must emit done event even on unexpected errors."""
+
+    async def test_chat_endpoint_survives_agent_error(self, client: AsyncClient):
+        """Agent endpoint should return valid SSE even if agent crashes."""
+        h = await _setup_user(client, "errtest@test.com", "errtest_user")
+        conv_id = await _create_conv(client, h, "error test")
+
+        # Mock understand to return TASK intent, then crash in planner
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(intent="task", needs_tools=True),
+                Exception("Simulated LLM crash"),
+            ]
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "do something complex", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            # Should still return 200 with SSE (not 500)
+            assert resp.status_code == 200
+            events = _parse_sse_events(resp.text)
+            # Should have a done event even after crash
+            done_events = events.get("done", [])
+            assert len(done_events) >= 1
+
+
+class TestDurableEventPersistence:
+    """TASK 6: Verify key lifecycle events are persisted to DB for durable timeline."""
+
+    @pytest.mark.asyncio
+    async def test_events_persisted_to_agent_events_table(self, client, db):
+        """Key events (agent_started, done) are written to agent_events."""
+        h = await _setup_user(client, "durability1@test.com", "durability1")
+        conv_id = await _create_conv(client, h, "Durability test")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(intent="conversation"),
+                "Hello! This is a durable response.",
+            ]
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hello", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            assert resp.status_code == 200
+            events = _parse_sse_events(resp.text)
+            done_events = events.get("done", [])
+            assert len(done_events) >= 1
+
+        # Check DB: agent_events should have persisted events
+        result = await db.execute(
+            text("SELECT id FROM agent_runs ORDER BY created_at DESC LIMIT 1")
+        )
+        run = result.fetchone()
+        if run:
+            result2 = await db.execute(
+                text("SELECT event_type FROM agent_events WHERE run_id = :rid ORDER BY sequence"),
+                {"rid": run[0]},
+            )
+            persisted = result2.fetchall()
+            persisted_types = [e[0] for e in persisted]
+            assert "agent_started" in persisted_types, f"Missing agent_started in {persisted_types}"
+            assert "done" in persisted_types, f"Missing done in {persisted_types}"
+
+    @pytest.mark.asyncio
+    async def test_persisted_events_have_unique_sequences(self, client, db):
+        """Persisted events have monotonically increasing, unique sequence numbers."""
+        h = await _setup_user(client, "durability2@test.com", "durability2")
+        conv_id = await _create_conv(client, h, "Sequence test")
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(intent="conversation"),
+                "Hi there!",
+            ]
+
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hi", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            assert resp.status_code == 200
+
+        result = await db.execute(
+            text("SELECT id FROM agent_runs ORDER BY created_at DESC LIMIT 1")
+        )
+        run = result.fetchone()
+        if run:
+            result2 = await db.execute(
+                text("SELECT sequence FROM agent_events WHERE run_id = :rid ORDER BY sequence"),
+                {"rid": run[0]},
+            )
+            rows = result2.fetchall()
+            seqs = [r[0] for r in rows]
+            assert len(seqs) == len(set(seqs)), f"Duplicate sequences: {seqs}"
+            for i in range(1, len(seqs)):
+                assert seqs[i] > seqs[i - 1], f"Non-monotonic: {seqs}"

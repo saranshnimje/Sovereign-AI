@@ -442,6 +442,23 @@ async def send_agent_message(
     elif tool_mode == "manual":
         tool_names = [t for t in manual_tools if isinstance(t, str) and t in tool_names]
 
+    # TASK 1: Filter out search_kb when no knowledge bases exist for this user.
+    # Without this, the agent attempts search_kb with a missing kb_id → validation
+    # error → retry loop → never recovers.
+    if "search_kb" in tool_names:
+        try:
+            from models.knowledge_base import KnowledgeBase
+            kb_res = await db.execute(
+                select(KnowledgeBase.id).where(KnowledgeBase.owner_id == current_user.id).limit(1)
+            )
+            has_kb = kb_res.scalar_one_or_none() is not None
+            if not has_kb:
+                tool_names = [t for t in tool_names if t != "search_kb"]
+                logger.info("Filtered search_kb: user %s has no knowledge bases", current_user.id)
+        except Exception:
+            # If KB query fails, keep search_kb (honest degradation)
+            pass
+
     tool_descriptions = reg.get_tool_list_for_prompt(
         allowed_names=tool_names, user_role=current_user.role
     )
@@ -473,7 +490,7 @@ async def send_agent_message(
     run_id = agent_run.id
 
     # Delegate to runtime
-    from services.agent.runtime import AgentRuntime
+    from services.agent.runtime import AgentRuntime, _PERSIST_EVENT_TYPES
 
     runtime = AgentRuntime()
 
@@ -484,59 +501,112 @@ async def send_agent_message(
                      conv_id, run_id, data.model_name, data.provider_id, tool_mode, agent_mode)
 
         full_content = ""
-        async for event_str in runtime.run(
-            goal=data.content,
-            user_id=current_user.id,
-            user_role=current_user.role,
-            model=data.model_name or data.model_name,
-            llm=llm,
-            db=session,
-            tool_names=tool_names,
-            tool_descriptions=tool_descriptions,
-            conversation_id=conv_id,
-            agent_state=agent,
-            agent_mode=agent_mode,
-            run_id=run_id,
-        ):
-            # On final_response: persist assistant message BEFORE yielding
-            # This ensures DONE => final response already exists in DB
-            if event_str.startswith("event: final_response\n"):
-                try:
-                    payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
-                    full_content = payload.get("content", "")
-                except Exception:
-                    pass
-
-                if full_content:
+        try:
+            async for event_str in runtime.run(
+                goal=data.content,
+                user_id=current_user.id,
+                user_role=current_user.role,
+                model=data.model_name or data.model_name,
+                llm=llm,
+                db=session,
+                tool_names=tool_names,
+                tool_descriptions=tool_descriptions,
+                conversation_id=conv_id,
+                agent_state=agent,
+                agent_mode=agent_mode,
+                run_id=run_id,
+            ):
+                # On final_response: persist assistant message BEFORE yielding
+                # This ensures DONE => final response already exists in DB
+                if event_str.startswith("event: final_response\n"):
                     try:
-                        assistant_msg = Msg(
-                            conversation_id=conv_id,
-                            role="assistant",
-                            content=full_content,
-                            metadata_json=json.dumps({
-                                "local": True, "agent": True,
-                                "state": agent.state.value,
-                                "tool_calls": agent.tool_call_count,
-                                "run_id": run_id,
-                            })
-                        )
-                        session.add(assistant_msg)
-                        await session.flush()
-                        await session.commit()
-                    except Exception:
-                        logger.warning("Failed to persist assistant message", exc_info=True)
-
-            # Yield event to frontend
-            yield event_str
-
-            # Collect final content from done event (fallback)
-            if event_str.startswith("event: done\n"):
-                try:
-                    payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
-                    if not full_content:
+                        payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
                         full_content = payload.get("content", "")
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+
+                    if full_content:
+                        try:
+                            assistant_msg = Msg(
+                                conversation_id=conv_id,
+                                role="assistant",
+                                content=full_content,
+                                metadata_json=json.dumps({
+                                    "local": True, "agent": True,
+                                    "state": agent.state.value,
+                                    "tool_calls": agent.tool_call_count,
+                                    "run_id": run_id,
+                                })
+                            )
+                            session.add(assistant_msg)
+                            await session.flush()
+                            await session.commit()
+                        except Exception:
+                            logger.warning("Failed to persist assistant message", exc_info=True)
+
+                # Yield event to frontend
+                yield event_str
+
+                # TASK 6: Persist key lifecycle events to DB for durable timeline.
+                # This ensures agent_events table has a complete record even if
+                # the frontend misses events during streaming.
+                # Skip agent_started — runtime already persists it manually.
+                if event_str.startswith("event: ") and not event_str.startswith("event: agent_started"):
+                    try:
+                        ev_type = event_str.split("event: ", 1)[1].split("\n", 1)[0].strip()
+                        if ev_type in _PERSIST_EVENT_TYPES:
+                            ev_payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
+                            from models.agent import AgentEvent
+                            # Continue sequence from runtime's counter to avoid
+                            # duplicate seq numbers (runtime already used seq 1 for agent_started)
+                            if not hasattr(_gen, '_evt_seq'):
+                                from sqlalchemy import func, select
+                                max_seq_q = await session.execute(
+                                    select(func.coalesce(func.max(AgentEvent.sequence), 0)).where(
+                                        AgentEvent.run_id == run_id
+                                    )
+                                )
+                                _gen._evt_seq = max_seq_q.scalar()
+                            _evt_seq = _gen._evt_seq + 1
+                            _gen._evt_seq = _evt_seq
+                            evt = AgentEvent(
+                                run_id=run_id,
+                                sequence=_evt_seq,
+                                event_type=ev_type,
+                                payload_json=json.dumps(ev_payload, default=str),
+                            )
+                            session.add(evt)
+                            await session.flush()
+                    except Exception:
+                        pass  # Non-fatal: persistence failure must not break the stream
+
+                # Collect final content from done event (fallback)
+                if event_str.startswith("event: done\n"):
+                    try:
+                        payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
+                        if not full_content:
+                            full_content = payload.get("content", "")
+                    except Exception:
+                        pass
+        except Exception as exc:
+            # TASK 5: If the runtime generator throws mid-stream, emit a done
+            # event with error state so the frontend sees a completed lifecycle
+            # instead of a raw network error / connection reset.
+            logger.exception("Agent generator error: %s", exc)
+            if agent.state.value not in ("completed", "failed", "cancelled"):
+                agent.fail(str(exc)[:200])
+            error_done = _sse("done", {
+                "content": full_content,
+                "token_count": 0,
+                "activity": agent.activity,
+                "tool_calls": agent.tool_call_count,
+                "state": agent.state.value,
+                "elapsed_ms": agent.get_elapsed_ms(),
+                "plan": [],
+                "observations": [],
+                "verification": None,
+            })
+            yield error_done
 
         # Update AgentRun status after stream completes
         try:
