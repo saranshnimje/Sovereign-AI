@@ -55,10 +55,10 @@ export default function AuditPage() {
     <div className="space-y-5">
       <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">Audit Log</h1>
-          <p className="text-sm text-neutral-400 mt-1">Tamper-evident hash-chained event log · {total.toLocaleString()} total events</p>
+          <h1 className="text-lg md:text-2xl font-bold text-white">Audit Log</h1>
+          <p className="text-xs md:text-sm text-neutral-400 mt-1">Tamper-evident hash-chained event log · {total.toLocaleString()} total events</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button onClick={handleVerify} disabled={verifying}
             className="px-3 py-1.5 text-sm font-medium border border-surface-border text-neutral-300 rounded-lg hover:bg-surface-muted disabled:opacity-50">
             {verifying ? '…' : '🔐 Verify Integrity'}
@@ -77,7 +77,7 @@ export default function AuditPage() {
       )}
 
       <div className="bg-surface-raised border border-surface-border rounded-xl p-4">
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
           <div>
             <label className="block text-xs font-medium text-neutral-500 mb-1">Event Type</label>
             <select value={eventType} onChange={e => { setEventType(e.target.value); setOffset(0) }} className={inputCls}>
@@ -108,43 +108,64 @@ export default function AuditPage() {
       </div>
 
       <div className="bg-surface-raised border border-surface-border rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-          {loading ? (
-            <div className="flex justify-center py-12">
-              <div className="animate-spin h-6 w-6 border-2 border-cyan-500 border-t-transparent rounded-full" />
-            </div>
-          ) : entries.length === 0 ? (
-            <div className="text-center py-12 text-neutral-500">No audit events match your filters</div>
-          ) : (
-            <table className="w-full text-sm" aria-label="Audit log entries">
-              <thead>
-                <tr className="bg-surface text-left border-b border-surface-border">
-                  <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">#</th>
-                  <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Timestamp</th>
-                  <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Type</th>
-                  <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Action</th>
-                  <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Outcome</th>
-                  <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Resource</th>
-                  <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">IP</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-surface-border">
-                {entries.map(e => (
-                  <tr key={e.id} onClick={() => setSelectedEntry(selectedEntry?.id === e.id ? null : e)}
-                    className="hover:bg-surface-muted cursor-pointer transition-colors">
-                    <td className="px-4 py-3 text-xs text-neutral-500 font-mono">{e.sequence_num}</td>
-                    <td className="px-4 py-3 text-xs text-neutral-400">{formatIST(e.timestamp)}</td>
-                    <td className="px-4 py-3"><span className="text-xs font-mono text-cyan-400">{e.event_type}</span></td>
-                    <td className="px-4 py-3 text-xs text-neutral-300 font-mono">{e.action}</td>
-                    <td className="px-4 py-3"><OutcomeBadge outcome={e.outcome} /></td>
-                    <td className="px-4 py-3 text-xs text-neutral-500">{e.resource_type || '—'}</td>
-                    <td className="px-4 py-3 text-xs font-mono text-neutral-500">{e.ip_address || '—'}</td>
+        {loading ? (
+          <div className="flex justify-center py-12">
+            <div className="animate-spin h-6 w-6 border-2 border-cyan-500 border-t-transparent rounded-full" />
+          </div>
+        ) : entries.length === 0 ? (
+          <div className="text-center py-12 text-neutral-500">No audit events match your filters</div>
+        ) : (
+          <>
+            {/* Desktop table */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-sm" aria-label="Audit log entries">
+                <thead>
+                  <tr className="bg-surface text-left border-b border-surface-border">
+                    <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">#</th>
+                    <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Timestamp</th>
+                    <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Type</th>
+                    <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Action</th>
+                    <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Outcome</th>
+                    <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">Resource</th>
+                    <th className="px-4 py-3 text-xs font-medium text-neutral-500 uppercase">IP</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+                </thead>
+                <tbody className="divide-y divide-surface-border">
+                  {entries.map(e => (
+                    <tr key={e.id} onClick={() => setSelectedEntry(selectedEntry?.id === e.id ? null : e)}
+                      className="hover:bg-surface-muted cursor-pointer transition-colors">
+                      <td className="px-4 py-3 text-xs text-neutral-500 font-mono">{e.sequence_num}</td>
+                      <td className="px-4 py-3 text-xs text-neutral-400">{formatIST(e.timestamp)}</td>
+                      <td className="px-4 py-3"><span className="text-xs font-mono text-cyan-400">{e.event_type}</span></td>
+                      <td className="px-4 py-3 text-xs text-neutral-300 font-mono">{e.action}</td>
+                      <td className="px-4 py-3"><OutcomeBadge outcome={e.outcome} /></td>
+                      <td className="px-4 py-3 text-xs text-neutral-500">{e.resource_type || '—'}</td>
+                      <td className="px-4 py-3 text-xs font-mono text-neutral-500">{e.ip_address || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Mobile card layout */}
+            <div className="md:hidden divide-y divide-surface-border">
+              {entries.map(e => (
+                <div key={e.id} onClick={() => setSelectedEntry(selectedEntry?.id === e.id ? null : e)}
+                  className="px-4 py-3 hover:bg-surface-muted cursor-pointer transition-colors">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-mono text-cyan-400">{e.event_type}</span>
+                    <OutcomeBadge outcome={e.outcome} />
+                  </div>
+                  <p className="text-xs text-neutral-300 font-mono truncate">{e.action}</p>
+                  <div className="flex items-center justify-between mt-1.5">
+                    <span className="text-[10px] text-neutral-500">{formatIST(e.timestamp)}</span>
+                    <span className="text-[10px] text-neutral-600 font-mono">#{e.sequence_num}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
 
         {selectedEntry && (
           <div className="border-t border-surface-border p-4 bg-surface">
@@ -157,12 +178,12 @@ export default function AuditPage() {
         )}
 
         {total > PAGE_SIZE && (
-          <div className="px-4 py-3 border-t border-surface-border flex items-center justify-between text-sm">
-            <span className="text-neutral-500">Showing {offset + 1}–{Math.min(offset + PAGE_SIZE, total)} of {total.toLocaleString()}</span>
-            <div className="flex gap-2">
+          <div className="px-4 py-3 border-t border-surface-border flex items-center justify-between text-xs md:text-sm">
+            <span className="text-neutral-500 hidden sm:inline">Showing {offset + 1}–{Math.min(offset + PAGE_SIZE, total)} of {total.toLocaleString()}</span>
+            <div className="flex gap-2 ml-auto">
               <button onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))} disabled={page === 1}
                 className="px-3 py-1 border border-surface-border rounded-lg disabled:opacity-40 hover:bg-surface-muted text-neutral-400">← Prev</button>
-              <span className="px-3 py-1 text-neutral-500">Page {page} / {totalPages}</span>
+              <span className="px-3 py-1 text-neutral-500">{page}/{totalPages}</span>
               <button onClick={() => setOffset(offset + PAGE_SIZE)} disabled={page >= totalPages}
                 className="px-3 py-1 border border-surface-border rounded-lg disabled:opacity-40 hover:bg-surface-muted text-neutral-400">Next →</button>
             </div>

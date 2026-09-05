@@ -43,8 +43,8 @@ export default function ToolsPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold text-white">Tools</h1>
-        <p className="text-sm text-neutral-400 mt-1">Manage tools, permissions, and approval requirements for AI agents.</p>
+        <h1 className="text-lg md:text-2xl font-bold text-white">Tools</h1>
+        <p className="text-xs md:text-sm text-neutral-400 mt-1">Manage tools, permissions, and approval requirements for AI agents.</p>
       </div>
 
       <div className="flex gap-2">

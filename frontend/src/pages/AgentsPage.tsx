@@ -56,14 +56,14 @@ export default function AgentsPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold text-white">Agents</h1>
-        <p className="text-sm text-neutral-400 mt-1">Monitor AI agent runs, tool calls, and execution flows.</p>
+        <h1 className="text-lg md:text-2xl font-bold text-white">Agents</h1>
+        <p className="text-xs md:text-sm text-neutral-400 mt-1">Monitor AI agent runs, tool calls, and execution flows.</p>
       </div>
 
-      <div className="flex gap-3 items-center">
+      <div className="flex gap-2 md:gap-3 items-center flex-wrap">
         {['', 'running', 'completed', 'failed', 'pending', 'cancelled'].map(s => (
           <button key={s} onClick={() => { setStatusFilter(s); setOffset(0) }}
-            className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${statusFilter === s ? 'bg-cyan-600 text-white border-cyan-600' : 'border-surface-border text-neutral-400 hover:bg-surface-muted'}`}>
+            className={`px-2 md:px-3 py-1.5 text-xs rounded-lg border transition-colors ${statusFilter === s ? 'bg-cyan-600 text-white border-cyan-600' : 'border-surface-border text-neutral-400 hover:bg-surface-muted'}`}>
             {s || 'All'}
           </button>
         ))}

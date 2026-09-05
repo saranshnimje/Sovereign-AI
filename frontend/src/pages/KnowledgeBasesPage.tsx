@@ -85,11 +85,11 @@ export default function KnowledgeBasesPage() {
     <div className="space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">Knowledge Bases</h1>
-          <p className="text-sm text-neutral-400 mt-1">Manage knowledge bases and documents for RAG-powered AI.</p>
+          <h1 className="text-lg md:text-2xl font-bold text-white">Knowledge Bases</h1>
+          <p className="text-xs md:text-sm text-neutral-400 mt-1">Manage knowledge bases and documents for RAG-powered AI.</p>
         </div>
         {isAdmin && (
-          <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500 transition-colors">
+          <button onClick={() => setShowCreate(true)} className="px-3 md:px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500 transition-colors">
             + Create Knowledge Base
           </button>
         )}

@@ -62,15 +62,15 @@ export default function IncidentsPage() {
     <div className="space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">Incidents</h1>
-          <p className="text-sm text-neutral-400 mt-1">Track, investigate, and manage incidents with AI analysis.</p>
+          <h1 className="text-lg md:text-2xl font-bold text-white">Incidents</h1>
+          <p className="text-xs md:text-sm text-neutral-400 mt-1">Track, investigate, and manage incidents with AI analysis.</p>
         </div>
-        <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500">
+        <button onClick={() => setShowCreate(true)} className="px-3 md:px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500">
           + New Incident
         </button>
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex gap-2 flex-wrap">
         {['', 'open', 'investigating', 'resolved', 'closed'].map(s => (
           <button key={s} onClick={() => setStatusFilter(s)}
             className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${statusFilter === s ? 'bg-cyan-600 text-white border-cyan-600' : 'border-surface-border text-neutral-400 hover:bg-surface-muted'}`}>

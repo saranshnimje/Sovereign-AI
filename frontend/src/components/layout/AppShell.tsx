@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../../stores/authStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -116,6 +116,7 @@ export default function AppShell() {
   const location = useLocation()
   const navigate = useNavigate()
   const [status, setStatus] = useState<SystemStatus | null>(null)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const role = user?.role ?? 'viewer'
   const navItems = NAV_ITEMS.filter((n) => n.roles.includes(role))
@@ -129,108 +130,90 @@ export default function AppShell() {
     return () => clearInterval(id)
   }, [])
 
+  // Close mobile drawer on route change
+  useEffect(() => {
+    setMobileMenuOpen(false)
+  }, [location.pathname])
+
   const handleLogout = async () => {
     try { await authApi.logout() } catch { /* ignore */ }
     clear()
     navigate('/login')
   }
 
+  const toggleMobileMenu = useCallback(() => {
+    setMobileMenuOpen(prev => !prev)
+  }, [])
+
+  const closeMobileMenu = useCallback(() => {
+    setMobileMenuOpen(false)
+  }, [])
+
   return (
     <div className="flex h-screen overflow-hidden bg-navy-950">
+      {/* ── Mobile backdrop ───────────────────────────────────── */}
+      {mobileMenuOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-30 md:hidden"
+          onClick={closeMobileMenu}
+          aria-hidden="true"
+        />
+      )}
+
       {/* ── Sidebar ──────────────────────────────────────────── */}
+      {/* Desktop sidebar */}
       <aside
-        className={`${sidebarOpen ? 'w-60' : 'w-16'} flex-shrink-0 bg-surface border-r border-surface-border flex flex-col transition-all duration-200 z-30`}
+        className={`${sidebarOpen ? 'w-60' : 'w-16'} hidden md:flex flex-shrink-0 bg-surface border-r border-surface-border flex-col transition-all duration-200 z-30`}
         aria-label="Sidebar navigation"
       >
-        {/* Logo */}
-        <div className="flex items-center gap-3 px-4 py-4 border-b border-surface-border">
-          <SovereignLogo size={32} animate={true} className="flex-shrink-0" />
-          {sidebarOpen && (
-            <div>
-              <span className="text-cyan-400 font-semibold text-sm">Sovereign AI</span>
-              <p className="text-[9px] text-neutral-500">Workbench v2.0</p>
-            </div>
-          )}
-        </div>
+        <SidebarContent
+          sidebarOpen={sidebarOpen}
+          status={status}
+          user={user}
+          navItems={navItems}
+          location={location}
+          onLogout={handleLogout}
+        />
+      </aside>
 
-        {/* Nav */}
-        <nav className="flex-1 py-3 overflow-y-auto px-2" aria-label="Main navigation">
-          <div className="space-y-0.5">
-            {navItems.map((item) => {
-              const active = location.pathname === item.to || (item.to !== '/' && location.pathname.startsWith(item.to))
-              const Icon = item.icon
-              return (
-                <Link key={item.to} to={item.to}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all
-                    ${active
-                      ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
-                      : 'text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 border border-transparent'
-                    }`}
-                  aria-current={active ? 'page' : undefined}>
-                  <span className="flex-shrink-0"><Icon active={active} /></span>
-                  {sidebarOpen && <span className="truncate">{item.label}</span>}
-                </Link>
-              )
-            })}
-          </div>
-        </nav>
-
-        {/* Bottom */}
-        {sidebarOpen && (
-          <div className="px-3 py-3 border-t border-surface-border space-y-3">
-            {/* Status card */}
-            <div className="bg-surface-overlay rounded-lg p-3 border border-surface-border">
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${status?.status === 'healthy' ? 'bg-success-500' : status?.status === 'degraded' ? 'bg-warning-500' : 'bg-danger-500'}`} />
-                <p className="text-[10px] text-neutral-400 font-medium">
-                  {status?.status === 'healthy' ? 'All Systems Operational' : status?.status === 'degraded' ? 'Degraded' : 'Checking...'}
-                </p>
-              </div>
-              {status?.services && (
-                <div className="mt-2 space-y-1">
-                  {Object.entries(status.services).map(([name, svc]) => (
-                    <div key={name} className="flex items-center justify-between">
-                      <span className="text-[9px] text-neutral-500">{name === 'llm' ? 'LLM' : name.charAt(0).toUpperCase() + name.slice(1)}</span>
-                      <span className={`text-[9px] ${svc.status === 'up' ? 'text-success-500' : 'text-danger-500'}`}>
-                        {svc.status === 'up' ? (svc.detail || 'Online') : 'Offline'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* User info */}
-            {user && (
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-600 to-cyan-800 flex items-center justify-center text-xs text-white font-medium flex-shrink-0 border border-cyan-500/30">
-                  {(user.username || user.email || 'U')[0].toUpperCase()}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs text-neutral-200 truncate">{user.username || user.email}</div>
-                  <div className="text-[10px] text-cyan-500 capitalize">{user.role}</div>
-                </div>
-                <button onClick={handleLogout} className="text-[10px] text-neutral-500 hover:text-danger-500 px-1.5 py-0.5 rounded transition-colors">
-                  Logout
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+      {/* Mobile sidebar drawer */}
+      <aside
+        className={`fixed inset-y-0 left-0 w-64 bg-surface border-r border-surface-border flex flex-col transition-transform duration-200 z-40 md:hidden ${
+          mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+        aria-label="Sidebar navigation"
+      >
+        <SidebarContent
+          sidebarOpen={true}
+          status={status}
+          user={user}
+          navItems={navItems}
+          location={location}
+          onLogout={handleLogout}
+        />
       </aside>
 
       {/* ── Main area ────────────────────────────────────────── */}
-      <div className="flex flex-col flex-1 overflow-hidden">
+      <div className="flex flex-col flex-1 overflow-hidden min-w-0">
         {/* Top bar */}
-        <header className="h-14 flex items-center gap-3 px-4 bg-surface/80 backdrop-blur-sm border-b border-surface-border z-20 flex-shrink-0">
+        <header className="h-14 flex items-center gap-2 px-3 md:px-4 bg-surface/80 backdrop-blur-sm border-b border-surface-border z-20 flex-shrink-0">
+          {/* Mobile hamburger */}
+          <button onClick={toggleMobileMenu}
+            className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors md:hidden" aria-label="Toggle navigation">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+            </svg>
+          </button>
+
+          {/* Desktop hamburger */}
           <button onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors" aria-label="Toggle sidebar">
+            className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors hidden md:block" aria-label="Toggle sidebar">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d={sidebarOpen ? "M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" : "M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5"} />
             </svg>
           </button>
 
-          {/* Search bar */}
+          {/* Search bar — hidden on mobile */}
           <div className="hidden md:flex items-center flex-1 max-w-md mx-4">
             <div className="flex items-center gap-2 w-full px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-neutral-500 text-sm">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -241,7 +224,7 @@ export default function AppShell() {
             </div>
           </div>
 
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex items-center gap-2 md:gap-3">
             <StatusPill />
 
             {/* Notifications */}
@@ -273,7 +256,7 @@ export default function AppShell() {
                 <div className="w-7 h-7 rounded-full bg-gradient-to-br from-cyan-600 to-cyan-800 flex items-center justify-center text-xs text-white font-medium border border-cyan-500/30">
                   {(user.username || user.email || 'U')[0].toUpperCase()}
                 </div>
-                <div className="hidden sm:block">
+                <div className="hidden lg:block">
                   <div className="text-xs text-neutral-200">{user.username}</div>
                   <div className="text-[10px] text-cyan-500 capitalize">{user.role}</div>
                 </div>
@@ -283,7 +266,7 @@ export default function AppShell() {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-6 bg-navy-950">
+        <main className="flex-1 overflow-y-auto p-3 md:p-6 bg-navy-950">
           <div className="max-w-7xl mx-auto">
             <Outlet />
           </div>
@@ -292,5 +275,95 @@ export default function AppShell() {
 
       <ToastContainer />
     </div>
+  )
+}
+
+/* ── Shared sidebar content ─────────────────────────────────────── */
+function SidebarContent({ sidebarOpen, status, user, navItems, location, onLogout }: {
+  sidebarOpen: boolean
+  status: SystemStatus | null
+  user: { id?: string; username?: string; email?: string; role?: string } | null
+  navItems: typeof NAV_ITEMS
+  location: ReturnType<typeof useLocation>
+  onLogout: () => void
+}) {
+  return (
+    <>
+      {/* Logo */}
+      <div className="flex items-center gap-3 px-4 py-4 border-b border-surface-border">
+        <SovereignLogo size={32} animate={true} className="flex-shrink-0" />
+        {sidebarOpen && (
+          <div>
+            <span className="text-cyan-400 font-semibold text-sm">Sovereign AI</span>
+            <p className="text-[9px] text-neutral-500">Workbench v2.0</p>
+          </div>
+        )}
+      </div>
+
+      {/* Nav */}
+      <nav className="flex-1 py-3 overflow-y-auto px-2" aria-label="Main navigation">
+        <div className="space-y-0.5">
+          {navItems.map((item) => {
+            const active = location.pathname === item.to || (item.to !== '/' && location.pathname.startsWith(item.to))
+            const Icon = item.icon
+            return (
+              <Link key={item.to} to={item.to}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all
+                  ${active
+                    ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
+                    : 'text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 border border-transparent'
+                  }`}
+                aria-current={active ? 'page' : undefined}>
+                <span className="flex-shrink-0"><Icon active={active} /></span>
+                {sidebarOpen && <span className="truncate">{item.label}</span>}
+              </Link>
+            )
+          })}
+        </div>
+      </nav>
+
+      {/* Bottom */}
+      {sidebarOpen && (
+        <div className="px-3 py-3 border-t border-surface-border space-y-3">
+          {/* Status card */}
+          <div className="bg-surface-overlay rounded-lg p-3 border border-surface-border">
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${status?.status === 'healthy' ? 'bg-success-500' : status?.status === 'degraded' ? 'bg-warning-500' : 'bg-danger-500'}`} />
+              <p className="text-[10px] text-neutral-400 font-medium">
+                {status?.status === 'healthy' ? 'All Systems Operational' : status?.status === 'degraded' ? 'Degraded' : 'Checking...'}
+              </p>
+            </div>
+            {status?.services && (
+              <div className="mt-2 space-y-1">
+                {Object.entries(status.services).map(([name, svc]) => (
+                  <div key={name} className="flex items-center justify-between">
+                    <span className="text-[9px] text-neutral-500">{name === 'llm' ? 'LLM' : name.charAt(0).toUpperCase() + name.slice(1)}</span>
+                    <span className={`text-[9px] ${svc.status === 'up' ? 'text-success-500' : 'text-danger-500'}`}>
+                      {svc.status === 'up' ? (svc.detail || 'Online') : 'Offline'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* User info */}
+          {user && (
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-600 to-cyan-800 flex items-center justify-center text-xs text-white font-medium flex-shrink-0 border border-cyan-500/30">
+                {(user.username || user.email || 'U')[0].toUpperCase()}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs text-neutral-200 truncate">{user.username || user.email}</div>
+                <div className="text-[10px] text-cyan-500 capitalize">{user.role}</div>
+              </div>
+              <button onClick={onLogout} className="text-[10px] text-neutral-500 hover:text-danger-500 px-1.5 py-0.5 rounded transition-colors">
+                Logout
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </>
   )
 }

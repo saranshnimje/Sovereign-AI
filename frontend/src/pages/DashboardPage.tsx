@@ -25,12 +25,12 @@ function SovereigntyScore({ score }: { score: number }) {
   const off = c * (1 - score / 100)
   return (
     <div className="relative flex items-center justify-center">
-      <svg viewBox="0 0 140 140" className="w-36 h-36 -rotate-90">
+      <svg viewBox="0 0 140 140" className="w-24 h-24 md:w-36 md:h-36 -rotate-90">
         <circle cx="70" cy="70" r={r} fill="none" stroke="#1e2d4a" strokeWidth="6" />
         <circle cx="70" cy="70" r={r} fill="none" stroke="#06b6d4" strokeWidth="6" strokeDasharray={c} strokeDashoffset={off} strokeLinecap="round" className="transition-all duration-700" />
       </svg>
       <div className="absolute text-center">
-        <p className="text-3xl font-bold text-white">{score}</p>
+        <p className="text-2xl md:text-3xl font-bold text-white">{score}</p>
         <p className="text-[9px] text-cyan-400 uppercase tracking-wider">Sovereignty Score</p>
       </div>
     </div>
@@ -160,9 +160,9 @@ export default function DashboardPage() {
   return (
     <div className="min-h-full space-y-5">
       {/* ── Top bar ──────────────────────────────────────────── */}
-      <div className="flex items-center justify-between flex-wrap gap-4">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-xl font-bold text-white">Dashboard</h1>
+          <h1 className="text-lg md:text-xl font-bold text-white">Dashboard</h1>
           <p className="text-xs text-neutral-400 mt-0.5">Monitor. Orchestrate. Optimize.</p>
         </div>
         <div className="flex items-center gap-3">

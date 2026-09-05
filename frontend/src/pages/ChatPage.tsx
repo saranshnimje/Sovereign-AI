@@ -787,10 +787,26 @@ export default function ChatPage() {
   // Check if a conversation has an active stream (for sidebar indicator)
   const isConvStreaming = (id: string) => activeStreams[id]?.streaming ?? false
 
+  const [mobileConvOpen, setMobileConvOpen] = useState(false)
+
+  // Close mobile conversation list on route change
+  useEffect(() => {
+    setMobileConvOpen(false)
+  }, [convId])
+
   return (
-    <div className="flex h-[calc(100vh-3.5rem-3rem)] gap-0">
-      {/* Conversation list */}
-      <aside className="w-64 flex-shrink-0 flex flex-col bg-surface-raised border-r border-surface-border rounded-l-lg overflow-hidden">
+    <div className="flex h-[calc(100vh-3.5rem-3rem)] gap-0 relative">
+      {/* Mobile conversation list backdrop */}
+      {mobileConvOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-30 lg:hidden"
+          onClick={() => setMobileConvOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Conversation list — desktop */}
+      <aside className="hidden lg:flex w-64 flex-shrink-0 flex-col bg-surface-raised border-r border-surface-border rounded-l-lg overflow-hidden">
         <div className="p-3 space-y-2 border-b border-surface-border">
           <button
             onClick={() => { navigate('/chat') }}
@@ -864,21 +880,113 @@ export default function ChatPage() {
         </div>
       </aside>
 
+      {/* Conversation list — mobile drawer */}
+      <aside className={`fixed inset-y-0 left-0 w-72 flex flex-col bg-surface-raised border-r border-surface-border z-40 lg:hidden transition-transform duration-200 ${
+        mobileConvOpen ? 'translate-x-0' : '-translate-x-full'
+      }`}>
+        <div className="p-3 space-y-2 border-b border-surface-border">
+          <div className="flex items-center justify-between">
+            <button
+              onClick={() => { navigate('/chat'); setMobileConvOpen(false) }}
+              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-cyan-600 text-white rounded-md text-sm font-medium hover:bg-cyan-500 transition-colors"
+            >
+              + New Chat
+            </button>
+            <button onClick={() => setMobileConvOpen(false)} className="ml-2 p-2 text-neutral-500 hover:text-neutral-300" aria-label="Close conversations">
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          {conversations.length > 0 && (
+            <input type="search" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search conversations…" aria-label="Search conversations"
+              className="w-full rounded-md border border-surface-border bg-surface px-2.5 py-1.5 text-xs text-neutral-200 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+          )}
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {loadingConv ? (
+            <div className="flex items-center justify-center py-8 gap-2 text-xs text-neutral-500">
+              <span className="animate-spin h-3 w-3 border-2 border-surface-border border-t-cyan-400 rounded-full inline-block" />
+              Loading…
+            </div>
+          ) : conversations.length === 0 ? (
+            <p className="text-xs text-neutral-500 text-center mt-6 px-3">No conversations yet</p>
+          ) : filtered.length === 0 ? (
+            <p className="text-xs text-neutral-500 text-center mt-6 px-3">No matches for "{searchQuery}"</p>
+          ) : (
+            Object.entries(dateGroups).map(([group, items]) => (
+              <div key={group}>
+                <p className="px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-cyan-700 select-none">{group}</p>
+                {items.map(c => (
+                  <div key={c.id}
+                    className={`group relative flex items-center border-b border-surface-border transition-colors
+                      ${convId === c.id ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500' : 'hover:bg-surface-muted'}`}>
+                    <button onClick={() => { navigate(`/chat/${c.id}`); setMobileConvOpen(false); setMenuOpenId(null) }}
+                      className={`flex-1 text-left px-3 py-2 text-sm min-w-0 ${convId === c.id ? 'text-cyan-400' : 'text-neutral-300'}`}>
+                      <div className="truncate font-medium flex items-center gap-1.5">
+                        {c.title || 'New conversation'}
+                        {isConvStreaming(c.id) && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse flex-shrink-0" />
+                        )}
+                      </div>
+                      <div className="text-[10px] text-neutral-500 mt-0.5 flex items-center gap-1">
+                        <span>{timeAgo(c.updated_at)}</span>
+                        <span>·</span>
+                        <span className="truncate">{c.model_name}</span>
+                      </div>
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); setMenuOpenId(menuOpenId === c.id ? null : c.id) }}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-surface-muted transition-opacity"
+                      aria-label="Conversation options">
+                      <span className="text-xs text-neutral-500">⋮</span>
+                    </button>
+                    {menuOpenId === c.id && (
+                      <>
+                        <div className="fixed inset-0 z-10" onClick={() => setMenuOpenId(null)} />
+                        <div className="absolute right-2 top-full mt-0 z-20 w-32 bg-surface-raised rounded-md shadow-lg border border-surface-border py-1">
+                          <button onClick={() => { setMenuOpenId(null); handleRename(c.id) }}
+                            className="block w-full text-left px-3 py-1.5 text-xs text-neutral-300 hover:bg-surface-muted">
+                            ✎ Rename
+                          </button>
+                          <button onClick={() => { setMenuOpenId(null); handleDelete(c.id) }}
+                            className="block w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-red-900/20">
+                            🗑 Delete
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      </aside>
+
       {/* Chat area */}
       <div className="flex flex-col flex-1 bg-surface rounded-r-lg overflow-hidden">
         {/* Toolbar */}
-        <div className="flex items-center gap-3 px-4 py-2.5 bg-surface-raised border-b border-surface-border flex-shrink-0">
+        <div className="flex items-center gap-2 px-3 py-2.5 bg-surface-raised border-b border-surface-border flex-shrink-0">
+          {/* Mobile: toggle conversation list */}
+          <button onClick={() => setMobileConvOpen(true)}
+            className="lg:hidden p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors flex-shrink-0"
+            aria-label="Open conversations">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+            </svg>
+          </button>
           <div className="relative" ref={modelDropdownRef}>
             <button
               onClick={() => { setModelDropdownOpen(v => !v); setModelSearch('') }}
-              className="text-sm border border-surface-border rounded-md px-2 py-1 bg-surface text-neutral-200 focus:outline-none focus:ring-2 focus:ring-cyan-500 max-w-xs text-left flex items-center gap-1"
+              className="text-sm border border-surface-border rounded-md px-2 py-1 bg-surface text-neutral-200 focus:outline-none focus:ring-2 focus:ring-cyan-500 max-w-[200px] md:max-w-xs text-left flex items-center gap-1"
               aria-label="Select AI model"
             >
               <span className="truncate">{activeModel.providerName} / {activeModel.modelName}</span>
               <svg className="w-3 h-3 shrink-0 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
             </button>
             {modelDropdownOpen && (
-              <div className="absolute z-50 mt-1 w-80 max-h-72 overflow-hidden bg-surface-raised border border-surface-border rounded-lg shadow-xl flex flex-col">
+              <div className="absolute z-50 mt-1 w-72 md:w-80 max-h-72 overflow-hidden bg-surface-raised border border-surface-border rounded-lg shadow-xl flex flex-col">
                 <div className="p-2 border-b border-surface-border">
                   <input
                     autoFocus
@@ -977,7 +1085,7 @@ export default function ChatPage() {
         </details>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-4">
+        <div className="flex-1 overflow-y-auto px-3 md:px-4 py-4">
           {!convId && !isStreaming && (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="text-4xl mb-3" aria-hidden="true">💬</div>
@@ -1068,7 +1176,7 @@ export default function ChatPage() {
         </div>
 
         {/* Input bar */}
-        <div className="px-4 py-3 bg-surface-raised border-t border-surface-border flex-shrink-0">
+        <div className="px-3 md:px-4 py-3 bg-surface-raised border-t border-surface-border flex-shrink-0">
           {/* Model indicator */}
           <div className="flex items-center gap-2 mb-2 text-[10px] text-neutral-500">
             <span className="w-1.5 h-1.5 rounded-full bg-cyan-500" />

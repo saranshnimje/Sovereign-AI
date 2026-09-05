@@ -322,14 +322,14 @@ export default function ProvidersPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">LLM Providers</h1>
-          <p className="text-sm text-neutral-400 mt-1">Configure AI model providers — local, cloud, or custom endpoints</p>
+          <h1 className="text-lg md:text-2xl font-bold text-white">LLM Providers</h1>
+          <p className="text-xs md:text-sm text-neutral-400 mt-1">Configure AI model providers — local, cloud, or custom endpoints</p>
         </div>
         {isAdmin && (
           <button onClick={() => setShowCreate('pick')}
-            className="flex items-center gap-2 px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500 transition-colors">
+            className="flex items-center gap-2 px-3 md:px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500 transition-colors">
             + Add Provider
           </button>
         )}
