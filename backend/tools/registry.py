@@ -146,6 +146,7 @@ class ToolRegistry:
         """
         Format enabled tools for injection into the LLM system prompt.
         Only shows tools the user's role can actually invoke.
+        Includes required fields so the LLM knows which parameters are mandatory.
         """
         tools = self.list_enabled(user_role)
         if allowed_names:
@@ -155,10 +156,14 @@ class ToolRegistry:
         for t in tools:
             try:
                 schema = t.input_schema.model_json_schema()
-                props = {
-                    k: v.get("type", v.get("anyOf", "any"))
-                    for k, v in schema.get("properties", {}).items()
-                }
+                required_set = set(schema.get("required", []))
+                props = {}
+                for k, v in schema.get("properties", {}).items():
+                    type_str = v.get("type", v.get("anyOf", "any"))
+                    if k in required_set:
+                        props[k] = f"{type_str} (required)"
+                    else:
+                        props[k] = type_str
             except Exception:
                 props = {}
             lines.append(

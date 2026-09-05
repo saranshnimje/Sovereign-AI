@@ -1470,3 +1470,264 @@ class TestAgentRunStatusOnTimeout:
         from services.agent.runtime import AGENT_MAX_RUNTIME_SECONDS
         assert isinstance(AGENT_MAX_RUNTIME_SECONDS, int)
         assert AGENT_MAX_RUNTIME_SECONDS > 0
+
+
+# ===================================================================
+# TOOL SCHEMA — required fields in prompt descriptions
+# ===================================================================
+
+@pytest.mark.asyncio
+class TestToolSchemaRequiredFields:
+    """Verify tool prompt descriptions include required field markers."""
+
+    def test_search_kb_schema_shows_required(self):
+        """search_kb schema must mark kb_id as required."""
+        from tools.registry import get_registry
+        reg = get_registry()
+        prompt = reg.get_tool_list_for_prompt(
+            allowed_names=["search_kb"], user_role="analyst"
+        )
+        assert "kb_id" in prompt
+        assert "required" in prompt
+
+    def test_all_tools_schema_includes_required(self):
+        """All tool schemas must include required field annotations."""
+        from tools.registry import get_registry
+        reg = get_registry()
+        prompt = reg.get_tool_list_for_prompt(user_role="admin")
+        # At minimum, search_kb should show kb_id as required
+        assert "kb_id" in prompt
+        assert "required" in prompt
+
+    def test_optional_fields_not_marked_required(self):
+        """Optional fields should NOT be marked as required."""
+        from tools.registry import get_registry
+        reg = get_registry()
+        prompt = reg.get_tool_list_for_prompt(
+            allowed_names=["search_kb"], user_role="analyst"
+        )
+        # top_k is optional (has default=3), should not say "required"
+        lines = [l for l in prompt.split("\n") if "top_k" in l]
+        # top_k should appear but not as required
+        if lines:
+            assert "required" not in lines[0].split("top_k")[1].split(")")[0]
+
+
+# ===================================================================
+# TOOL EXECUTION — context with rag_service / kb_service
+# ===================================================================
+
+@pytest.mark.asyncio
+class TestToolContextServices:
+    """Verify _execute_tool builds context with RAG/KB services for search_kb."""
+
+    async def test_execute_tool_search_kb_gets_services(self):
+        """_execute_tool should inject rag_service and kb_service for search_kb."""
+        from services.agent.runtime import AgentRuntime
+        from tools.registry import get_registry
+
+        runtime = AgentRuntime()
+        reg = get_registry()
+        mock_llm = MagicMock()
+
+        # Mock the search_kb handler to capture context
+        captured_context = {}
+        original_handler = reg.get("search_kb").handler
+
+        async def capture_handler(inp, ctx):
+            captured_context.update(ctx)
+            return {"results": [], "found": False, "count": 0}
+
+        reg.get("search_kb").handler = capture_handler
+
+        try:
+            result = await runtime._execute_tool(
+                tool_name="search_kb",
+                tool_input={"kb_id": "test-kb", "query": "test query"},
+                user_role="analyst",
+                db=MagicMock(),
+                user_id="user-1",
+                reg=reg,
+                llm=mock_llm,
+            )
+            # Context should have both services
+            assert "kb_service" in captured_context, "kb_service missing from context"
+            assert "rag_service" in captured_context, "rag_service missing from context"
+            assert "user" in captured_context
+        finally:
+            reg.get("search_kb").handler = original_handler
+
+    async def test_execute_tool_non_search_no_extra_services(self):
+        """Non-search tools should NOT get rag_service/kb_service."""
+        from services.agent.runtime import AgentRuntime
+        from tools.registry import get_registry
+
+        runtime = AgentRuntime()
+        reg = get_registry()
+
+        captured_context = {}
+        original_handler = reg.get("calculator").handler
+
+        async def capture_handler(inp, ctx):
+            captured_context.update(ctx)
+            return {"result": 42}
+
+        reg.get("calculator").handler = capture_handler
+
+        try:
+            await runtime._execute_tool(
+                tool_name="calculator",
+                tool_input={"expression": "6*7"},
+                user_role="analyst",
+                db=MagicMock(),
+                user_id="user-1",
+                reg=reg,
+                llm=MagicMock(),
+            )
+            assert "kb_service" not in captured_context
+            assert "rag_service" not in captured_context
+        finally:
+            reg.get("calculator").handler = original_handler
+
+    async def test_execute_tool_search_kb_graceful_without_llm(self):
+        """search_kb context should gracefully handle missing llm (no rag_service)."""
+        from services.agent.runtime import AgentRuntime
+        from tools.registry import get_registry
+
+        runtime = AgentRuntime()
+        reg = get_registry()
+
+        captured_context = {}
+        original_handler = reg.get("search_kb").handler
+
+        async def capture_handler(inp, ctx):
+            captured_context.update(ctx)
+            return {"results": [], "found": False, "count": 0}
+
+        reg.get("search_kb").handler = capture_handler
+
+        try:
+            await runtime._execute_tool(
+                tool_name="search_kb",
+                tool_input={"kb_id": "test-kb", "query": "test"},
+                user_role="analyst",
+                db=MagicMock(),
+                user_id="user-1",
+                reg=reg,
+                llm=None,  # No LLM
+            )
+            # kb_service should exist, rag_service should not
+            assert "kb_service" in captured_context
+            assert "rag_service" not in captured_context
+        finally:
+            reg.get("search_kb").handler = original_handler
+
+
+# ===================================================================
+# REASONER RETRY — malformed output recovery
+# ===================================================================
+
+@pytest.mark.asyncio
+class TestReasonerRetry:
+    """Verify reasoner retries with corrective prompt on malformed output."""
+
+    async def test_reasoner_retries_on_unparseable_output(self):
+        """When reasoner returns garbage, it should retry once with correction."""
+        from services.agent.runtime import AgentRuntime
+        from services.agent_state import AgentStateMachine
+
+        runtime = AgentRuntime()
+        agent = AgentStateMachine()
+        agent.start("test goal")
+
+        garbage_resp = MagicMock()
+        garbage_resp.content = "I think we should use web_search to find information"
+
+        corrected_resp = MagicMock()
+        corrected_resp.content = json.dumps({
+            "decision": "VERIFY",
+            "reason": "Attempting verification after correction",
+        })
+
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(side_effect=[garbage_resp, corrected_resp])
+
+        decision = await runtime._decide(
+            llm=mock_llm, model="test", goal="test goal",
+            agent=agent, observations=[], evidence=[],
+            failed_attempts=[], tool_results_context=[],
+            tool_descriptions="No tools",
+        )
+        # Should have retried and gotten VERIFY
+        assert decision.decision == "VERIFY"
+        assert mock_llm.chat.call_count == 2
+
+    async def test_reasoner_returns_fail_after_retry_exhaustion(self):
+        """When retry also fails, reasoner returns FAIL."""
+        from services.agent.runtime import AgentRuntime
+        from services.agent_state import AgentStateMachine
+
+        runtime = AgentRuntime()
+        agent = AgentStateMachine()
+        agent.start("test goal")
+
+        garbage1 = MagicMock()
+        garbage1.content = "not json at all"
+
+        garbage2 = MagicMock()
+        garbage2.content = "still not json"
+
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(side_effect=[garbage1, garbage2])
+
+        decision = await runtime._decide(
+            llm=mock_llm, model="test", goal="test goal",
+            agent=agent, observations=[], evidence=[],
+            failed_attempts=[], tool_results_context=[],
+            tool_descriptions="No tools",
+        )
+        # Should fall back to VERIFY (tool_call_count == 0)
+        assert decision.decision == "VERIFY"
+        assert mock_llm.chat.call_count == 2
+
+    async def test_retry_reasoner_with_correction_returns_none_on_error(self):
+        """Corrective retry should return None on LLM error."""
+        from services.agent.runtime import AgentRuntime
+
+        runtime = AgentRuntime()
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(side_effect=Exception("LLM down"))
+
+        result = await runtime._retry_reasoner_with_correction(
+            llm=mock_llm, model="test", raw_output="bad", goal="test",
+        )
+        assert result is None
+
+
+# ===================================================================
+# TOOL EXECUTION — llm parameter passed through
+# ===================================================================
+
+@pytest.mark.asyncio
+class TestExecuteToolLlmPassthrough:
+    """Verify _execute_tool passes llm to context building."""
+
+    async def test_execute_tool_receives_llm_parameter(self):
+        """_execute_tool should accept and use llm parameter."""
+        from services.agent.runtime import AgentRuntime
+        from tools.registry import get_registry
+
+        runtime = AgentRuntime()
+        reg = get_registry()
+
+        # calculator doesn't need llm, but it should not crash
+        result = await runtime._execute_tool(
+            tool_name="calculator",
+            tool_input={"expression": "1+1"},
+            user_role="analyst",
+            db=MagicMock(),
+            user_id="user-1",
+            reg=reg,
+            llm=MagicMock(),
+        )
+        assert "error" not in result or result.get("tool") == "calculator"

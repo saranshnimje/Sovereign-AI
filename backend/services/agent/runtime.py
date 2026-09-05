@@ -430,7 +430,7 @@ class AgentRuntime:
             if action.tool in tool_names:
                 result = await self._execute_tool(
                     tool_name=action.tool, tool_input=action.input,
-                    user_role=user_role, db=db, user_id=user_id, reg=reg,
+                    user_role=user_role, db=db, user_id=user_id, reg=reg, llm=llm,
                 )
                 passed, reason = _verify_tool_result(action.tool, result)
                 tool_results_context.append(f"{action.tool} → {reason[:200]}")
@@ -464,7 +464,7 @@ class AgentRuntime:
             if action.tool in tool_names:
                 result = await self._execute_tool(
                     tool_name=action.tool, tool_input=action.input,
-                    user_role=user_role, db=db, user_id=user_id, reg=reg,
+                    user_role=user_role, db=db, user_id=user_id, reg=reg, llm=llm,
                 )
                 passed, reason = _verify_tool_result(action.tool, result)
                 tool_results_context.append(f"{action.tool} → {reason[:200]}")
@@ -767,7 +767,7 @@ class AgentRuntime:
 
                     result = await self._execute_tool(
                         tool_name=action.tool, tool_input=action.input,
-                        user_role=user_role, db=db, user_id=user_id, reg=reg,
+                        user_role=user_role, db=db, user_id=user_id, reg=reg, llm=llm,
                     )
 
                     # Objective verification
@@ -1424,6 +1424,19 @@ class AgentRuntime:
         data = parse_llm_json(text)
         if data.get("type") == "error":
             logger.warning("Reasoner raw output (unparseable): %s", text[:500])
+            # Retry once with corrective prompt
+            retry_text = await self._retry_reasoner_with_correction(
+                llm=llm, model=model, raw_output=text, goal=goal,
+            )
+            if retry_text:
+                data = parse_llm_json(retry_text)
+                if data.get("type") == "error":
+                    logger.warning("Reasoner retry still unparseable: %s", retry_text[:300])
+                else:
+                    try:
+                        return AgentDecision.model_validate(data)
+                    except Exception:
+                        logger.warning("Reasoner retry invalid schema: %s", data)
             # Fallback: if no tools executed yet, try verification
             if agent.tool_call_count == 0:
                 return AgentDecision(
@@ -1436,6 +1449,17 @@ class AgentRuntime:
             decision = AgentDecision.model_validate(data)
         except Exception:
             logger.warning("Reasoner invalid schema: %s | raw: %s", data, text[:300])
+            # Retry once with corrective prompt
+            retry_text = await self._retry_reasoner_with_correction(
+                llm=llm, model=model, raw_output=text, goal=goal,
+            )
+            if retry_text:
+                retry_data = parse_llm_json(retry_text)
+                if retry_data.get("type") != "error":
+                    try:
+                        return AgentDecision.model_validate(retry_data)
+                    except Exception:
+                        logger.warning("Reasoner retry still invalid: %s", retry_data)
             # Fallback: if plan is done or no tools needed, verify
             pending_tools = [s for s in agent.plan if s.status == "pending" and s.tool_name] if agent.plan else []
             # If no tools executed yet (first iteration), or no pending tools, try verification
@@ -1447,6 +1471,43 @@ class AgentRuntime:
             return AgentDecision(decision="FAIL", reason="Invalid reasoner output format")
 
         return decision
+
+    async def _retry_reasoner_with_correction(
+        self, *, llm: Any, model: str, raw_output: str, goal: str,
+    ) -> str | None:
+        """Retry the reasoner with a corrective prompt when output was malformed."""
+        corrective_system = (
+            "You are the REASONER for an autonomous AI agent. "
+            "Your previous response was NOT valid JSON. "
+            "You MUST respond with ONLY a valid JSON object matching this exact schema:\n"
+            '{"decision": "CONTINUE|RETRY|REPLAN|VERIFY|COMPLETE|ASK_USER|FAIL", '
+            '"reason": "explanation", '
+            '"next_action": {"tool": "name", "input": {...}, "reasoning": "why"} | null}\n'
+            "Do NOT include any text before or after the JSON. No markdown, no explanation."
+        )
+        corrective_user = (
+            f"Goal: {goal}\n\n"
+            f"Your previous malformed response was:\n{raw_output[:500]}\n\n"
+            "Fix it. Return ONLY valid JSON."
+        )
+        try:
+            resp = await asyncio.wait_for(
+                llm.chat(
+                    model=model,
+                    messages=[
+                        ChatMessage(role="system", content=corrective_system),
+                        ChatMessage(role="user", content=corrective_user),
+                    ],
+                    stream=False,
+                    temperature=0.0,
+                    max_tokens=512,
+                ),
+                timeout=_TIMEOUT_REASONER,
+            )
+            return (resp.content or "") if hasattr(resp, "content") else str(resp)
+        except Exception as exc:
+            logger.warning("Reasoner corrective retry failed: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Internal: Verification
@@ -1608,7 +1669,7 @@ class AgentRuntime:
     async def _execute_tool(
         self, *, tool_name: str, tool_input: dict,
         user_role: str, db: AsyncSession, user_id: str,
-        reg: Any, skip_approval: bool = True,
+        reg: Any, llm: Any = None, skip_approval: bool = True,
     ) -> dict:
         """Execute a tool through the security chain.
 
@@ -1681,11 +1742,34 @@ class AgentRuntime:
             if not approved:
                 return {"error": f"Approval denied: {note}"}
 
-        # 5. Build context
+        # 5. Build context with services tools need
         from types import SimpleNamespace
         context = {
             "user": SimpleNamespace(id=user_id, role=user_role),
         }
+
+        # Lazily initialize RAG/KB services for tools that need them
+        if tool_name in ("search_kb",):
+            try:
+                from services.knowledge_base_service import KnowledgeBaseService
+                from services.qdrant_service import QdrantService
+                from services.embedding_service import EmbeddingService
+                from services.rag_service import RagService
+
+                qdrant_svc = QdrantService()
+                kb_svc = KnowledgeBaseService(db, qdrant_svc)
+                context["kb_service"] = kb_svc
+
+                if llm is not None:
+                    embedding_svc = EmbeddingService(llm)
+                    rag_svc = RagService(
+                        llm=llm,
+                        embedding_svc=embedding_svc,
+                        qdrant_svc=qdrant_svc,
+                    )
+                    context["rag_service"] = rag_svc
+            except Exception as exc:
+                logger.debug("Failed to init RAG services for tool %s: %s", tool_name, exc)
 
         # 6. Execute with per-tool timeout
         try:
