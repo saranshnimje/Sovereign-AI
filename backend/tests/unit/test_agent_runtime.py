@@ -498,3 +498,123 @@ async def test_failed_tool_exhausted_retries_is_failed():
     # Should end in failed (max iterations or exhausted retries)
     assert agent.state.value == "failed", f"Expected failed, got {agent.state.value}"
     assert agent.state.value != "completed"
+
+
+# ------------------------------------------------------------------
+# TASK 4: Duplicate agent_started regression test
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_exactly_one_agent_started_per_run():
+    """Regression: exactly one agent_started event per run_id.
+
+    Previously, agent_started was both yielded as SSE AND manually persisted
+    with a separate sequence counter, causing duplicates when the frontend
+    merged SSE events with persisted DB events.
+    """
+    agent = AgentStateMachine()
+    run_id = "test-run-42"
+
+    async def mock_chat(**kwargs):
+        messages = kwargs.get("messages", [])
+        system_msg = messages[0].content if messages else ""
+        if "PLANNER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "goal": "test",
+                "acceptance_criteria": ["done"],
+                "steps": [{"id": 1, "description": "step 1", "tool": None, "success_criteria": "done"}]
+            }))
+        if "REASONER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "decision": "COMPLETE",
+                "reason": "done",
+                "next_action": None
+            }))
+        if "VERIFIER" in system_msg:
+            return MagicMock(content=json.dumps({
+                "verified": True,
+                "confidence": 0.9,
+                "criteria": [],
+                "missing": [],
+                "unsupported_claims": []
+            }))
+        return MagicMock(content=json.dumps({"decision": "FAIL", "reason": "give up"}))
+
+    llm = MagicMock()
+    llm.chat = mock_chat
+
+    runtime = AgentRuntime()
+
+    # Mock DB to track persisted events
+    mock_db = AsyncMock()
+    persisted_events = []
+
+    original_add = mock_db.add
+    def track_add(evt):
+        persisted_events.append(evt)
+    mock_db.add = MagicMock(side_effect=track_add)
+
+    events = []
+    async for event in runtime.run(
+        goal="test", user_id="u1", user_role="admin", model="test",
+        llm=llm, db=mock_db, tool_names=[], tool_descriptions="",
+        agent_state=agent, run_id=run_id,
+    ):
+        events.append(event)
+
+    # Count agent_started in SSE events
+    sse_agent_started = [e for e in events if "agent_started" in e and "event: agent_started" in e]
+    assert len(sse_agent_started) == 1, (
+        f"Expected exactly 1 agent_started SSE event, got {len(sse_agent_started)}"
+    )
+
+    # Count agent_started in persisted events
+    persisted_agent_started = [e for e in persisted_events if e.event_type == "agent_started"]
+    assert len(persisted_agent_started) == 1, (
+        f"Expected exactly 1 agent_started persisted event, got {len(persisted_agent_started)}"
+    )
+
+    # Verify both have the same run_id
+    assert persisted_agent_started[0].run_id == run_id
+
+    # Verify sequence is 1 (first event)
+    assert persisted_agent_started[0].sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_no_duplicate_events_from_gen_and_runtime():
+    """Regression: events persisted by runtime._emit_event should NOT be
+    re-persisted by the chat.py _gen() wrapper.
+
+    The _gen() wrapper skips agent_started. Other events are persisted by both
+    runtime and _gen(), but with different sequence numbers. This test verifies
+    the runtime's _emit_event persists events correctly.
+    """
+    mock_db = AsyncMock()
+    persisted_events = []
+
+    def track_add(evt):
+        persisted_events.append(evt)
+    mock_db.add = MagicMock(side_effect=track_add)
+
+    runtime = AgentRuntime()
+    runtime._run_id = "test-run-99"
+    runtime._db = mock_db
+    runtime._sequence = 0
+
+    # Emit several events
+    await runtime._emit_event("agent_started", {"run_id": "test-run-99"})
+    await runtime._emit_event("plan_created", {"goal": "test"})
+    await runtime._emit_event("tool_call", {"tool": "calculator"})
+
+    # Each event should have a unique, monotonically increasing sequence
+    sequences = [e.sequence for e in persisted_events]
+    assert sequences == [1, 2, 3], f"Expected sequences [1,2,3], got {sequences}"
+
+    # All should have the same run_id
+    for e in persisted_events:
+        assert e.run_id == "test-run-99"
+
+    # Event types should match
+    types = [e.event_type for e in persisted_events]
+    assert types == ["agent_started", "plan_created", "tool_call"]

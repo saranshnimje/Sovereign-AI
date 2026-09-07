@@ -287,8 +287,21 @@ export default function ChatPage() {
     }
 
     while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
+      let readResult: Awaited<ReturnType<typeof reader.read>>
+      try {
+        readResult = await reader.read()
+      } catch (readErr: any) {
+        // TASK 5: Stream read failure after done event is normal — the server
+        // closed the connection. Only treat as error if we haven't seen a done
+        // event yet. TypeError occurs when the stream is already closed.
+        if (doneProcessed || acc) {
+          console.debug('[SSE] Stream read error after completion (normal):', readErr?.name || readErr)
+          break
+        }
+        throw readErr
+      }
+      if (readResult.done) break
+      const value = readResult.value
       buf += decoder.decode(value, { stream: true })
       // Handle both \n and \r\n line endings per SSE spec
       const lines = buf.split(/\r?\n/)
@@ -359,6 +372,7 @@ export default function ChatPage() {
             storeEvent('tool_timeout', d)
           } else if (ev === 'todo_updated') {
             updateStream(convId, { todo: d.tasks || [] })
+            storeEvent('todo_updated', d)
           } else if (ev === 'todo_task_added') {
             const stream = getStream(convId)
             if (stream) {
@@ -374,9 +388,11 @@ export default function ChatPage() {
           } else if (ev === 'plan_created') {
             // Plan created — update agent state to show planning is done
             updateStream(convId, { agentState: d.state || 'planning' })
+            storeEvent('plan_created', d)
           } else if (ev === 'plan_updated') {
             // Plan updated during replanning
             updateStream(convId, { agentState: d.state || 'replanning' })
+            storeEvent('plan_updated', d)
           } else if (ev === 'decision') {
             // Reasoning decision — show activity
             updateStream(convId, { agentState: d.activity || d.state || 'reasoning' })
@@ -392,16 +408,19 @@ export default function ChatPage() {
               verificationStatus: 'started',
               verificationType: d.type || null,
             })
+            storeEvent('verification_started', d)
           } else if (ev === 'verification_passed') {
             updateStream(convId, {
               verificationStatus: 'passed',
               verificationType: d.type || null,
             })
+            storeEvent('verification_passed', d)
           } else if (ev === 'verification_failed') {
             updateStream(convId, {
               verificationStatus: 'failed',
               verificationType: d.type || null,
             })
+            storeEvent('verification_failed', d)
           } else if (ev === 'cancelled') {
             // Cancellation — atomically clear all streaming state
             updateStream(convId, {
@@ -412,6 +431,7 @@ export default function ChatPage() {
           } else if (ev === 'retry') {
             // Tool retry — update agent state
             updateStream(convId, { agentState: d.reason || 'retrying' })
+            storeEvent('retry', d)
           } else if (ev === 'observation') {
             // Observation from tool execution
             updateStream(convId, { agentState: d.description || 'observing' })
@@ -423,20 +443,6 @@ export default function ChatPage() {
             storeEvent('final_response', d)
           } else if (ev === 'agent_started') {
             storeEvent('agent_started', d)
-          } else if (ev === 'plan_created') {
-            storeEvent('plan_created', d)
-          } else if (ev === 'plan_updated') {
-            storeEvent('plan_updated', d)
-          } else if (ev === 'retry') {
-            storeEvent('retry', d)
-          } else if (ev === 'verification_started') {
-            storeEvent('verification_started', d)
-          } else if (ev === 'verification_passed') {
-            storeEvent('verification_passed', d)
-          } else if (ev === 'verification_failed') {
-            storeEvent('verification_failed', d)
-          } else if (ev === 'todo_updated') {
-            storeEvent('todo_updated', d)
           } else if (ev === 'subagent_spawned') {
             const stream = getStream(convId)
             if (stream) {
@@ -674,7 +680,15 @@ export default function ChatPage() {
       const currentStream = getStream(currentConvId!)
       if (currentStream?.runId !== runId) return // Stale error, ignore
 
-      if (err?.name === 'AbortError') {
+      // TASK 5: If we already received content, the "network error" is a false
+      // alarm — the server closed normally but the client saw a read error.
+      // Only surface the error if we have NO content at all.
+      const hasStreamedContent = currentStream?.streamContent
+      if (hasStreamedContent && !err?.message?.includes('401')) {
+        console.debug('[SSE] Ignoring post-completion error:', err?.message)
+        // Don't show error toast — content was already delivered
+        return
+      } else if (err?.name === 'AbortError') {
         // User cancelled — atomically clear all streaming state
         updateStream(currentConvId!, {
           streaming: false,

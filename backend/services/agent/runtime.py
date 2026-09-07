@@ -193,6 +193,7 @@ class AgentRuntime:
         self._sequence: int = 0
         self._run_id: str | None = None
         self._db: AsyncSession | None = None
+        self._user_kb_ids: list[str] | None = None
 
     async def _emit_event(self, event_type: str, payload: dict) -> str:
         """Emit an SSE event with monotonically increasing sequence number.
@@ -1025,6 +1026,7 @@ class AgentRuntime:
         agent_state: AgentStateMachine | None = None,
         agent_mode: str = "agent",
         run_id: str | None = None,
+        user_kb_ids: list[str] | None = None,
     ) -> AsyncGenerator[str, None]:
         """Execute the full autonomous agent loop.
 
@@ -1040,6 +1042,7 @@ class AgentRuntime:
         self._run_id = run_id
         self._db = db
         self._sequence = 0
+        self._user_kb_ids = user_kb_ids
 
         # --- Build execution context ---
         from tools.registry import get_registry
@@ -1060,35 +1063,17 @@ class AgentRuntime:
         # --- Action fingerprint tracking for loop detection ---
         _action_fingerprints: dict[str, int] = {}
 
-        # --- Emit agent_started event ---
-        yield _sse("agent_started", {
+        # --- Emit agent_started event (via _emit_event for single source of truth) ---
+        # TASK 4: Use _emit_event() instead of manual persistence to avoid
+        # duplicate agent_started events. _emit_event handles both SSE emission
+        # and DB persistence atomically.
+        yield await self._emit_event("agent_started", {
             "run_id": run_id,
             "conversation_id": conversation_id,
             "goal": goal[:200],
             "model": model,
             "agent_mode": agent_mode,
         })
-        # Persist agent_started event
-        if self._run_id and self._db:
-            try:
-                from models.agent import AgentEvent
-                self._sequence += 1
-                evt = AgentEvent(
-                    run_id=self._run_id,
-                    sequence=self._sequence,
-                    event_type="agent_started",
-                    payload_json=_json.dumps({
-                        "run_id": run_id,
-                        "conversation_id": conversation_id,
-                        "goal": goal[:200],
-                        "model": model,
-                        "agent_mode": agent_mode,
-                    }, default=str),
-                )
-                self._db.add(evt)
-                await self._db.flush()
-            except Exception:
-                logger.warning("Failed to persist agent_started event", exc_info=True)
 
         # --- Build initial context ---
         messages: list[ChatMessage] = []
@@ -1757,6 +1742,12 @@ class AgentRuntime:
             }
 
         # 3. Input validation
+        # TASK 1: Auto-inject kb_id for search_kb when user has KBs.
+        # The LLM should never need to guess kb_id — we inject it from context.
+        if tool_name == "search_kb" and self._user_kb_ids:
+            if not tool_input.get("kb_id"):
+                tool_input = {**tool_input, "kb_id": self._user_kb_ids[0]}
+                logger.info("Auto-injected kb_id=%s for search_kb", self._user_kb_ids[0])
         try:
             validated_input = reg.validate_input(tool, tool_input)
         except Exception as exc:

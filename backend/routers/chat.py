@@ -445,16 +445,20 @@ async def send_agent_message(
     # TASK 1: Filter out search_kb when no knowledge bases exist for this user.
     # Without this, the agent attempts search_kb with a missing kb_id → validation
     # error → retry loop → never recovers.
+    # When KBs DO exist, collect their IDs so runtime can auto-inject kb_id.
+    user_kb_ids: list[str] = []
     if "search_kb" in tool_names:
         try:
             from models.knowledge_base import KnowledgeBase
             kb_res = await db.execute(
-                select(KnowledgeBase.id).where(KnowledgeBase.owner_id == current_user.id).limit(1)
+                select(KnowledgeBase.id).where(KnowledgeBase.owner_id == current_user.id)
             )
-            has_kb = kb_res.scalar_one_or_none() is not None
-            if not has_kb:
+            user_kb_ids = [row[0] for row in kb_res.all()]
+            if not user_kb_ids:
                 tool_names = [t for t in tool_names if t != "search_kb"]
                 logger.info("Filtered search_kb: user %s has no knowledge bases", current_user.id)
+            else:
+                logger.info("User %s has %d KBs, search_kb will auto-inject kb_id", current_user.id, len(user_kb_ids))
         except Exception:
             # If KB query fails, keep search_kb (honest degradation)
             pass
@@ -515,6 +519,7 @@ async def send_agent_message(
                 agent_state=agent,
                 agent_mode=agent_mode,
                 run_id=run_id,
+                user_kb_ids=user_kb_ids,
             ):
                 # On final_response: persist assistant message BEFORE yielding
                 # This ensures DONE => final response already exists in DB
