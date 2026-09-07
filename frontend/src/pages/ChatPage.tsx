@@ -62,9 +62,17 @@ export default function ChatPage() {
   const streamingActiveRef = useRef<boolean>(false)
 
   const [searchQuery, setSearchQuery] = useState('')
-  const [loadingConv, setLoadingConv] = useState(false)
+  // Sidebar list loading state — controlled ONLY by refreshConversations().
+  // Deliberately separate from loadingDetail so a conversation-detail fetch
+  // (which runs on every convId change / stream guard) can never leave the
+  // sidebar stuck on "Loading…".
+  const [loadingConversations, setLoadingConversations] = useState(false)
+  // Detail-panel loading state — reflects only fetching the open conversation.
+  const [loadingDetail, setLoadingDetail] = useState(false)
   const latestFetchId = useRef<string | null>(null)
   const conversationFetchGen = useRef(0)
+  // Request generation for race-safe conversation-list refreshes (latest wins).
+  const conversationRefreshGen = useRef(0)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
 
   // Get active stream for current conversation
@@ -79,10 +87,31 @@ export default function ChatPage() {
   const verificationStatus = activeStream?.verificationStatus ?? 'none'
   const verificationType = activeStream?.verificationType ?? null
 
+  // Race-safe conversation list refresh. A request-generation counter makes the
+  // latest call win: a stale in-flight response is ignored, so a slow earlier
+  // fetch can never overwrite a newer one. Existing conversations stay visible
+  // during the refresh (loading only shows when the list is empty), and failures
+  // are non-destructive (previous list remains). Never touches loadingDetail.
+  const refreshConversations = useCallback(async () => {
+    const gen = ++conversationRefreshGen.current
+    setLoadingConversations(true)
+    try {
+      const list = await chatApi.listConversations()
+      if (conversationRefreshGen.current !== gen) return // stale — newer refresh owns the list
+      setConversations(list)
+    } catch {
+      // Non-destructive: keep the existing conversations visible on failure.
+    } finally {
+      if (conversationRefreshGen.current === gen) {
+        setLoadingConversations(false)
+      }
+    }
+  }, [setConversations])
+
   // Load conversations on mount
   useEffect(() => {
-    chatApi.listConversations().then(setConversations).catch(() => {})
-  }, [])
+    refreshConversations()
+  }, [refreshConversations])
 
   // Load model options on mount
   useEffect(() => {
@@ -139,7 +168,7 @@ export default function ChatPage() {
     if (convId) {
       latestFetchId.current = convId
       const gen = ++conversationFetchGen.current
-      setLoadingConv(true)
+      setLoadingDetail(true)
       chatApi.getConversation(convId)
         .then((d) => {
           if (latestFetchId.current !== convId) return
@@ -152,11 +181,17 @@ export default function ChatPage() {
           const stream = currentStreams[convId]
           if (stream?.streaming) {
             const hasAssistant = d.messages.some(m => m.role === 'assistant')
-            if (!hasAssistant) return // Don't overwrite — stream is still in progress
+            if (!hasAssistant) {
+              // Stream still in progress with no persisted assistant message yet.
+              // Don't overwrite optimistic/streaming state — but DO clear the
+              // detail loading flag so it never stays stuck on "Loading…".
+              setLoadingDetail(false)
+              return
+            }
           }
           setDetail(d)
           detailRef.current = d
-          setLoadingConv(false)
+          setLoadingDetail(false)
 
           // Load persisted agent events for this conversation
           chatApi.getAgentEvents(convId)
@@ -178,7 +213,7 @@ export default function ChatPage() {
         .catch(() => {
           if (latestFetchId.current !== convId) return
           if (conversationFetchGen.current !== gen) return
-          setLoadingConv(false)
+          setLoadingDetail(false)
           // Don't navigate away if there's an active stream for this conversation
           const currentStreams = useChatStore.getState().activeStreams
           const stream = currentStreams[convId]
@@ -189,7 +224,7 @@ export default function ChatPage() {
     } else {
       setDetail(null)
       detailRef.current = null
-      setLoadingConv(false)
+      setLoadingDetail(false)
     }
   }, [convId, navigate]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -716,10 +751,10 @@ export default function ChatPage() {
         endStream(currentConvId!)
       }
       inputRef.current?.focus()
-      // Refresh conversation list
-      chatApi.listConversations().then(setConversations).catch(() => {})
+      // Refresh conversation list (race-safe; latest refresh wins, non-destructive)
+      refreshConversations()
     }
-  }, [toolMode, pluginMode, agentMode, navigate, addToast, startStream, updateStream, endStream, updateConversation, addConversation, setConversations, processSSEStream, getStream, setDetail, convId])
+  }, [toolMode, pluginMode, agentMode, navigate, addToast, startStream, updateStream, endStream, updateConversation, addConversation, setConversations, processSSEStream, getStream, setDetail, refreshConversations, convId])
 
   const handleSend = useCallback(() => {
     const text = input.trim()
@@ -835,7 +870,7 @@ export default function ChatPage() {
           )}
         </div>
         <div className="flex-1 overflow-y-auto">
-          {loadingConv ? (
+          {loadingConversations && conversations.length === 0 ? (
             <div className="flex items-center justify-center py-8 gap-2 text-xs text-neutral-500">
               <span className="animate-spin h-3 w-3 border-2 border-surface-border border-t-cyan-400 rounded-full inline-block" />
               Loading…
@@ -919,7 +954,7 @@ export default function ChatPage() {
           )}
         </div>
         <div className="flex-1 overflow-y-auto">
-          {loadingConv ? (
+          {loadingConversations && conversations.length === 0 ? (
             <div className="flex items-center justify-center py-8 gap-2 text-xs text-neutral-500">
               <span className="animate-spin h-3 w-3 border-2 border-surface-border border-t-cyan-400 rounded-full inline-block" />
               Loading…

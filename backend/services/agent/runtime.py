@@ -48,9 +48,12 @@ from services.agent.schemas import (
     Plan,
     PlanStep,
     RequestIntent,
+    ToolAction,
     UnderstandingResult,
     VerificationCriteriaResult,
     VerificationResult,
+    coerce_decision_data,
+    extract_native_tool_call,
     parse_llm_json,
 )
 from services.agent_state import (
@@ -110,6 +113,48 @@ def _fingerprint(tool_name: str, tool_input: dict) -> str:
     """Compute a normalized action fingerprint for loop detection."""
     normalized = _json.dumps(tool_input, sort_keys=True, default=str)
     return f"{tool_name}::{normalized}"
+
+
+# Tool-name aliases the LLM may emit instead of canonical registry names.
+# Smaller/free models frequently output "websearch"/"search" for the canonical
+# "web_search" tool or "webfetch" for "web_fetch". We canonicalize centrally,
+# BEFORE any permission check, registry lookup, validation, or execution, so a
+# misnamed tool never surfaces as "Tool 'x' not found". We do NOT register
+# duplicate tools to compensate for model mistakes — aliases stay in one place.
+_TOOL_ALIASES = {
+    "websearch": "web_search",
+    "web-search": "web_search",
+    "search": "web_search",
+    "websrch": "web_search",
+    "web": "web_search",
+    "google": "web_search",
+    "google-search": "web_search",
+    "google_search": "web_search",
+    "bing": "web_search",
+    "duckduckgo": "web_search",
+    "search-the-web": "web_search",
+    "webfetch": "web_fetch",
+    "web-fetch": "web_fetch",
+    "fetch": "web_fetch",
+    "fetch-url": "web_fetch",
+    "fetch_url": "web_fetch",
+    "get-page": "web_fetch",
+    "getpage": "web_fetch",
+    "httpget": "web_fetch",
+    "url": "web_fetch",
+}
+
+
+def canonicalize_tool_name(name: str | None) -> str | None:
+    """Resolve a model-proposed tool name to its canonical registry name.
+
+    Trims whitespace, normalizes case, then checks the alias map. Unknown names
+    pass through (normalized so exact canonical lowercase names still match).
+    """
+    if not name:
+        return name
+    normalized = re.sub(r"\s+", " ", name.strip()).lower()
+    return _TOOL_ALIASES.get(normalized, normalized)
 
 
 def _verify_tool_result(tool_name: str, result: dict) -> tuple[bool, str]:
@@ -436,6 +481,7 @@ class AgentRuntime:
 
         if decision.decision in ("CONTINUE", "RETRY") and decision.next_action:
             action = decision.next_action
+            action.tool = canonicalize_tool_name(action.tool) or action.tool
             if action.tool in tool_names:
                 result = await self._execute_tool(
                     tool_name=action.tool, tool_input=action.input,
@@ -470,6 +516,7 @@ class AgentRuntime:
 
         if decision.decision in ("CONTINUE", "RETRY") and decision.next_action:
             action = decision.next_action
+            action.tool = canonicalize_tool_name(action.tool) or action.tool
             if action.tool in tool_names:
                 result = await self._execute_tool(
                     tool_name=action.tool, tool_input=action.input,
@@ -676,6 +723,12 @@ class AgentRuntime:
 
                     action = decision.next_action
 
+                    # Normalize the model-proposed tool name (websearch → web_search,
+                    # search → web_search, webfetch → web_fetch, …) so allowed-list
+                    # checks, loop fingerprints, todo bookkeeping, lifecycle events,
+                    # and execution all use the canonical registry name.
+                    action.tool = canonicalize_tool_name(action.tool) or action.tool
+
                     # Skip tool if not in allowed list (tool_mode=none)
                     if tool_names is not None and len(tool_names) == 0:
                         logger.info("Tool %s skipped (tool_mode=none)", action.tool)
@@ -774,9 +827,15 @@ class AgentRuntime:
                         "reasoning": action.reasoning[:200],
                     })
 
-                    # TASK 3: Guarantee exactly one terminal event per tool_call.
+                    # TASK 5: Guarantee exactly one terminal event per tool_call.
+                    # Contract: every tool_call is followed by exactly one of
+                    #   tool_result   (status = success | failed | error)
+                    #   tool_timeout  (status = timeout)
                     # Wrap in try/except so even if _execute_tool or processing
-                    # raises, we emit tool_failed instead of leaving RUNNING.
+                    # raises, we emit tool_result(status="error") instead of
+                    # leaving the tool permanently RUNNING. There is NO separate
+                    # "tool_failed" event type — frontend maps status "failed" and
+                    # "error" to the error terminal state.
                     _tool_terminal_emitted = False
                     try:
                         result = await self._execute_tool(
@@ -821,8 +880,8 @@ class AgentRuntime:
                         _tool_terminal_emitted = True
                     except Exception as exc:
                         # Safety net: if anything between tool_call and terminal
-                        # event raises, emit tool_failed so the tool is never
-                        # left permanently RUNNING.
+                        # event raises, emit tool_result(status="error") so the
+                        # tool is never left permanently RUNNING.
                         if not _tool_terminal_emitted:
                             duration_ms = int((time.monotonic() - start_time) * 1000)
                             agent.record_tool_result(
@@ -962,6 +1021,13 @@ class AgentRuntime:
 
                 case "ANSWER_DIRECTLY":
                     final_content = decision.answer or decision.reason
+                    # ANSWER_DIRECTLY can follow a tool observation. COMPLETED is
+                    # not reachable directly from OBSERVING (FSM: OBSERVING →
+                    # REASONING → … → COMPLETED), so route through REASONING
+                    # first — otherwise agent.complete() raises Invalid transition
+                    # and the whole run is marked failed after a successful tool use.
+                    if agent.state == AgentState.OBSERVING:
+                        agent.reason()
                     agent.complete()
                     yield _sse("agent_state", agent.to_dict())
                     break
@@ -1457,56 +1523,68 @@ class AgentRuntime:
             logger.warning("Reasoning failed: %s", exc)
             return AgentDecision(decision="FAIL", reason=f"LLM error: {exc}")
 
+        decision = self._try_reasoner_decision(text)
+        if decision is not None:
+            return decision
+
+        # parse_llm_json failed or schema validation failed — log + corrective retry
+        logger.warning("Reasoner output (raw): %s", text[:500])
+        retry_text = await self._retry_reasoner_with_correction(
+            llm=llm, model=model, raw_output=text, goal=goal,
+        )
+        if retry_text:
+            decision = self._try_reasoner_decision(retry_text)
+            if decision is not None:
+                return decision
+            logger.warning("Reasoner retry still invalid: %s", retry_text[:300])
+
+        # Fallback: never destroy a run that gathered real evidence. When the
+        # reasoner cannot produce a decision but the agent has already executed
+        # multiple tools, route to VERIFY — the verifier independently judges
+        # the acceptance criteria, so a run with accumulated evidence can close
+        # out honestly instead of hard-failing on a reasoner hiccup. FAIL only
+        # when there is essentially no evidence to verify.
+        pending_tools = (
+            [s for s in agent.plan if s.status == "pending" and s.tool_name]
+            if agent.plan else []
+        )
+        if (not pending_tools) or agent.tool_call_count == 0 or agent.tool_call_count >= 2:
+            return AgentDecision(
+                decision="VERIFY",
+                reason="Could not parse reasoner output, attempting verification",
+            )
+        return AgentDecision(decision="FAIL", reason="Could not parse reasoner output")
+
+    def _try_reasoner_decision(self, text: str) -> AgentDecision | None:
+        """Try to parse reasoner text into an AgentDecision.
+
+        Handles:
+        1. Valid JSON with schema drift (reasoning→reason, list→first next_action)
+        2. Native function-call tokens (no JSON at all):
+           <|tool_call_start|>web_search(query='...')<|tool_call_end|>
+           <tool_call>web_search<arg_key>query</arg_key>...</tool_call>
+        Returns AgentDecision on success, None on failure.
+        """
+        # 1) Try JSON parse → coerce → validate
         data = parse_llm_json(text)
-        if data.get("type") == "error":
-            logger.warning("Reasoner raw output (unparseable): %s", text[:500])
-            # Retry once with corrective prompt
-            retry_text = await self._retry_reasoner_with_correction(
-                llm=llm, model=model, raw_output=text, goal=goal,
-            )
-            if retry_text:
-                data = parse_llm_json(retry_text)
-                if data.get("type") == "error":
-                    logger.warning("Reasoner retry still unparseable: %s", retry_text[:300])
-                else:
-                    try:
-                        return AgentDecision.model_validate(data)
-                    except Exception:
-                        logger.warning("Reasoner retry invalid schema: %s", data)
-            # Fallback: if no tools executed yet, try verification
-            if agent.tool_call_count == 0:
-                return AgentDecision(
-                    decision="VERIFY",
-                    reason="Could not parse reasoner output, attempting verification",
-                )
-            return AgentDecision(decision="FAIL", reason="Could not parse reasoner output")
+        if data.get("type") != "error":
+            data = coerce_decision_data(data)
+            try:
+                return AgentDecision.model_validate(data)
+            except Exception:
+                pass  # fall through to native detection
 
-        try:
-            decision = AgentDecision.model_validate(data)
-        except Exception:
-            logger.warning("Reasoner invalid schema: %s | raw: %s", data, text[:300])
-            # Retry once with corrective prompt
-            retry_text = await self._retry_reasoner_with_correction(
-                llm=llm, model=model, raw_output=text, goal=goal,
+        # 2) Detect native function-call token format (no JSON at all)
+        tc = extract_native_tool_call(text)
+        if tc and tc.get("tool"):
+            return AgentDecision(
+                decision="CONTINUE",
+                reason="Model emitted a native tool call",
+                next_action=ToolAction(tool=tc["tool"], input=tc.get("input") or {}),
+                answer=None,
             )
-            if retry_text:
-                retry_data = parse_llm_json(retry_text)
-                if retry_data.get("type") != "error":
-                    try:
-                        return AgentDecision.model_validate(retry_data)
-                    except Exception:
-                        logger.warning("Reasoner retry still invalid: %s", retry_data)
-            # Fallback: if plan is done or no tools needed, verify
-            pending_tools = [s for s in agent.plan if s.status == "pending" and s.tool_name] if agent.plan else []
-            # If no tools executed yet (first iteration), or no pending tools, try verification
-            if not pending_tools or agent.tool_call_count == 0:
-                return AgentDecision(
-                    decision="VERIFY",
-                    reason="Reasoner output invalid, attempting verification",
-                )
-            return AgentDecision(decision="FAIL", reason="Invalid reasoner output format")
 
-        return decision
+        return None
 
     async def _retry_reasoner_with_correction(
         self, *, llm: Any, model: str, raw_output: str, goal: str,
@@ -1516,10 +1594,13 @@ class AgentRuntime:
             "You are the REASONER for an autonomous AI agent. "
             "Your previous response was NOT valid JSON. "
             "You MUST respond with ONLY a valid JSON object matching this exact schema:\n"
-            '{"decision": "CONTINUE|RETRY|REPLAN|VERIFY|COMPLETE|ASK_USER|FAIL", '
+            '{"decision": "CONTINUE|RETRY|REPLAN|VERIFY|COMPLETE|ASK_USER|FAIL|ANSWER_DIRECTLY", '
             '"reason": "explanation", '
-            '"next_action": {"tool": "name", "input": {...}, "reasoning": "why"} | null}\n'
-            "Do NOT include any text before or after the JSON. No markdown, no explanation."
+            '"next_action": {"tool": "name", "input": {...}, "reasoning": "why"} | null, '
+            '"answer": "final answer when ANSWER_DIRECTLY, otherwise null"}\n'
+            "For ANSWER_DIRECTLY set next_action to null and provide the final answer "
+            "in the answer field. Do NOT include any text before or after the JSON. "
+            "No markdown, no explanation."
         )
         corrective_user = (
             f"Goal: {goal}\n\n"
@@ -1719,6 +1800,15 @@ class AgentRuntime:
 
         t0 = time.monotonic()
         _TOOL_TIMEOUT_SECONDS = 30.0
+
+        # 0. Canonicalize the tool name before anything else so LLM aliases
+        #    (websearch → web_search, webfetch → web_fetch, …) resolve to the
+        #    registry name used for lookup, permission, validation, execution,
+        #    lifecycle events, and the tool-call UI.
+        canonical = canonicalize_tool_name(tool_name)
+        if canonical != tool_name:
+            logger.info("Canonicalized tool '%s' -> '%s'", tool_name, canonical)
+            tool_name = canonical
 
         # 1. Lookup tool
         tool = reg.get(tool_name)

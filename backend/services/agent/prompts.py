@@ -62,7 +62,7 @@ Given the current state, decide the NEXT action.
 
 Respond with ONLY a JSON object:
 {{
-  "decision": "ONE OF: CONTINUE, RETRY, REPLAN, VERIFY, COMPLETE, ASK_USER, FAIL",
+  "decision": "ONE OF: CONTINUE, RETRY, REPLAN, VERIFY, COMPLETE, ASK_USER, FAIL, ANSWER_DIRECTLY",
   "reason": "brief explanation of why",
   "next_action": {{
     "tool": "tool_name",
@@ -79,9 +79,15 @@ DECISIONS:
 - COMPLETE: The goal is achieved and verified.
 - ASK_USER: Need clarification from the user.
 - FAIL: The goal cannot be achieved.
+- ANSWER_DIRECTLY: You already have enough information to answer the user
+  without executing another tool. Provide the final answer in the "answer"
+  field and leave "next_action" as null.
 
 next_action is required for CONTINUE and RETRY.
-next_action must be null for VERIFY, COMPLETE, ASK_USER, FAIL.
+next_action must be null for VERIFY, COMPLETE, ASK_USER, FAIL, and ANSWER_DIRECTLY.
+
+When answering directly (ANSWER_DIRECTLY), also set:
+  "answer": "your final answer to the user"
 """
 
 REASONER_USER = """\

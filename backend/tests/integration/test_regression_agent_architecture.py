@@ -912,6 +912,70 @@ class TestObservableAgentExecution:
         event_types = [e["event_type"] for e in data["events"]]
         assert "agent_started" in event_types
 
+    async def test_get_agent_events_scoped_to_conversation(self, client: AsyncClient):
+        """M: GET agent-events must NOT leak events from other conversations.
+
+        Two conversations, same user, two agent runs. Querying conversation B's
+        agent-events must return only B's events — not A's. (The former endpoint
+        used SELECT * WHERE user_id = current_user which leaked cross-conversation
+        events.)
+        """
+        h = await _setup_obs_user(client, "obs_m@test.com")
+        conv_a = await _create_conv(client, h, "conv A leak")
+        conv_b = await _create_conv(client, h, "conv B leak")
+
+        # Run agent in both conversations (conversation intent, single turn)
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(intent="conversation"),
+            ]
+            await client.post(
+                f"/api/v1/chat/conversations/{conv_a}/agent",
+                json={"content": "hello A", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(intent="conversation"),
+            ]
+            await client.post(
+                f"/api/v1/chat/conversations/{conv_b}/agent",
+                json={"content": "hello B", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+
+        # Query conv B's agent-events
+        resp_b = await client.get(
+            f"/api/v1/chat/conversations/{conv_b}/agent-events",
+            headers=h,
+        )
+        assert resp_b.status_code == 200
+        data_b = resp_b.json()
+        # Every run_id returned must belong to conv B's agent_started payload
+        runs_b = {r["id"] for r in data_b.get("runs", [])}
+
+        # Query conv A's agent-events
+        resp_a = await client.get(
+            f"/api/v1/chat/conversations/{conv_a}/agent-events",
+            headers=h,
+        )
+        data_a = resp_a.json()
+        runs_a = {r["id"] for r in data_a.get("runs", [])}
+
+        # No overlap — sets must be disjoint
+        overlap = runs_a & runs_b
+        assert not overlap, (
+            f"Agent-events leaked across conversations: runs {overlap} appear "
+            f"in both conv A ({conv_a}) and conv B ({conv_b})"
+        )
+
     async def test_get_agent_events_unauthorized(self, client: AsyncClient):
         """L: GET agent-events returns 404 for unauthorized user."""
         h1 = await _setup_obs_user(client, "obs_l1@test.com")

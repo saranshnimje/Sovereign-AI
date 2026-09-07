@@ -160,12 +160,24 @@ async def get_agent_events(
         except Exception:
             pass
 
-    # Also check agent_runs directly
-    run_res = await db.execute(
-        select(AgentRun).where(AgentRun.user_id == current_user.id)
+    # Also find run_ids from persisted agent_started events whose payload
+    # carries this conversation_id (AgentRun has no conversation_id column,
+    # so payload inspection is the only way to scope runs to the conversation).
+    evt_run_res = await db.execute(
+        select(AgentEvent)
+        .join(AgentRun, AgentEvent.run_id == AgentRun.id)
+        .where(
+            AgentEvent.event_type == "agent_started",
+            AgentRun.user_id == current_user.id,
+        )
     )
-    for run in run_res.scalars().all():
-        run_ids.add(run.id)
+    for evt in evt_run_res.scalars().all():
+        try:
+            payload = json.loads(evt.payload_json) if evt.payload_json else {}
+            if payload.get("conversation_id") == conv_id:
+                run_ids.add(evt.run_id)
+        except Exception:
+            pass
 
     if not run_ids:
         return {"events": [], "runs": []}
@@ -555,8 +567,51 @@ async def send_agent_message(
                 # TASK 6: Persist key lifecycle events to DB for durable timeline.
                 # This ensures agent_events table has a complete record even if
                 # the frontend misses events during streaming.
-                # Skip agent_started — runtime already persists it manually.
-                if event_str.startswith("event: ") and not event_str.startswith("event: agent_started"):
+                #
+                # TASK 8: agent_started is persisted by the runtime's
+                # _emit_event(), whose flush can silently fail (observed: a run
+                # with 24 persisted events but no agent_started row, so the
+                # refreshed timeline lost its entry point). Persist it here too,
+                # deduplicated by checking whether the runtime's copy landed.
+                if event_str.startswith("event: agent_started"):
+                    try:
+                        from models.agent import AgentEvent
+                        from sqlalchemy import select
+                        _dup = (
+                            await session.execute(
+                                select(AgentEvent.id).where(
+                                    AgentEvent.run_id == run_id,
+                                    AgentEvent.event_type == "agent_started",
+                                ).limit(1)
+                            )
+                        ).scalar_one_or_none()
+                        if _dup is not None:
+                            continue  # runtime copy already durable — no duplicate
+                        ev_type = "agent_started"
+                        ev_payload = json.loads(
+                            event_str.split("data: ", 1)[1].split("\n\n", 1)[0]
+                        )
+                        if not hasattr(_gen, "_evt_seq"):
+                            from sqlalchemy import func, select
+                            max_seq_q = await session.execute(
+                                select(func.coalesce(func.max(AgentEvent.sequence), 0)).where(
+                                    AgentEvent.run_id == run_id
+                                )
+                            )
+                            _gen._evt_seq = max_seq_q.scalar()
+                        _evt_seq = _gen._evt_seq + 1
+                        _gen._evt_seq = _evt_seq
+                        evt = AgentEvent(
+                            run_id=run_id,
+                            sequence=_evt_seq,
+                            event_type=ev_type,
+                            payload_json=json.dumps(ev_payload, default=str),
+                        )
+                        session.add(evt)
+                        await session.flush()
+                    except Exception:
+                        pass  # Non-fatal: persistence failure must not break the stream
+                elif event_str.startswith("event: "):
                     try:
                         ev_type = event_str.split("event: ", 1)[1].split("\n", 1)[0].strip()
                         if ev_type in _PERSIST_EVENT_TYPES:
@@ -582,8 +637,16 @@ async def send_agent_message(
                             )
                             session.add(evt)
                             await session.flush()
-                    except Exception:
-                        pass  # Non-fatal: persistence failure must not break the stream
+                    except Exception as exc:
+                        # TASK 8: surface silent persistence failures instead of
+                        # swallowing them, so a lost event can be diagnosed.
+                        logger.warning(
+                            "Failed to persist agent event type=%s seq=%s: %s",
+                            ev_type if "ev_type" in dir() else "?",
+                            _evt_seq if "_evt_seq" in dir() else "?",
+                            exc,
+                            exc_info=True,
+                        )
 
                 # Collect final content from done event (fallback)
                 if event_str.startswith("event: done\n"):
