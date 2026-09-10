@@ -14,6 +14,13 @@ export default function LoginPage() {
   const [setupMode, setSetupMode] = useState(false)
   const [username, setUsername] = useState('')
 
+  // Demo/test credentials intentionally exposed for the prototype UI.
+  // Only explicitly-configured demo accounts are listed here — no real secrets.
+  const DEMO_CREDENTIALS = [
+    { email: 'admin@admin.com', password: 'admin12345678', role: 'admin' },
+    { email: 'e2e_analyst@test.com', password: 'Eg2_1ZmggndlNnagVGwc', role: 'analyst' },
+  ]
+
   useEffect(() => { if (accessToken) navigate('/') }, [accessToken])
   useEffect(() => { authApi.setupStatus().then((s) => setSetupMode(s.setup_required)).catch(() => {}) }, [])
 
@@ -27,6 +34,14 @@ export default function LoginPage() {
     } catch (err: any) {
       setError(err?.response?.data?.error?.message || err?.response?.data?.detail || 'Login failed')
     } finally { setLoading(false) }
+  }
+
+  // Fill the form with a demo user's credentials. Does NOT submit.
+  const useDemoCredentials = (demo: { email: string; password: string }) => {
+    setSetupMode(false)
+    setEmail(demo.email)
+    setPassword(demo.password)
+    setError('')
   }
 
   const inputCls = "w-full rounded-lg border border-surface-border bg-surface px-3 py-2.5 text-sm text-neutral-200 placeholder-neutral-600 shadow-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition-colors"
@@ -98,7 +113,46 @@ export default function LoginPage() {
           </form>
 
           {!setupMode && (
-            <p className="text-xs text-neutral-500 text-center mt-4">New here? Contact your administrator to get an account.</p>
+            <>
+              <p className="text-xs text-neutral-500 text-center mt-4">New here? Contact your administrator to get an account.</p>
+
+              <div className="mt-6 border-t border-surface-border pt-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <h3 className="text-sm font-semibold text-neutral-300">Demo Credentials</h3>
+                  <span className="text-[10px] uppercase tracking-wider bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 rounded px-1.5 py-0.5">Prototype</span>
+                </div>
+                <p className="text-xs text-neutral-500 mb-3">These credentials are for the prototype/demo. Click <span className="text-neutral-300">Use Credentials</span> to fill the form (it won't sign you in automatically).</p>
+                <div className="overflow-hidden border border-surface-border rounded-lg">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-surface text-neutral-400 text-left">
+                        <th className="px-3 py-2 font-medium">Email</th>
+                        <th className="px-3 py-2 font-medium">Password</th>
+                        <th className="px-3 py-2 font-medium">Role</th>
+                        <th className="px-3 py-2 font-medium text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-surface-border">
+                      {DEMO_CREDENTIALS.map((demo) => (
+                        <tr key={demo.email} className="bg-surface-raised/40">
+                          <td className="px-3 py-2 text-neutral-200 break-all">{demo.email}</td>
+                          <td className="px-3 py-2 text-neutral-300">{demo.password}</td>
+                          <td className="px-3 py-2">
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-[10px] uppercase tracking-wide">{demo.role}</span>
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <button type="button" onClick={() => useDemoCredentials(demo)}
+                              className="text-cyan-400 hover:text-cyan-300 font-medium transition-colors">
+                              Use Credentials
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
           )}
         </div>
 
