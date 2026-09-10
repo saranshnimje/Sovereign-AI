@@ -56,13 +56,14 @@ def create_app() -> FastAPI:
     )
 
     # ---- CORS ----
-    # FRONTEND_ORIGINS is a comma-separated allowlist. FRONTEND_ORIGIN remains
-    # supported as a backward-compatible fallback for existing deployments.
-    configured_origins = settings.frontend_origins.strip()
-    if configured_origins:
-        frontend_origins = [origin.strip().rstrip("/") for origin in configured_origins.split(",") if origin.strip()]
-    else:
-        frontend_origins = [settings.frontend_origin.strip().rstrip("/")]
+    # FRONTEND_ORIGINS and FRONTEND_ORIGIN both support comma-separated allowlists.
+    # FRONTEND_ORIGINS takes precedence when both are configured.
+    configured_origins = settings.frontend_origins.strip() or settings.frontend_origin.strip()
+    frontend_origins = [
+        origin.strip().rstrip("/")
+        for origin in configured_origins.split(",")
+        if origin.strip()
+    ]
 
     # Keep local development origins available while production origins remain
     # explicitly controlled by the environment variable above.
@@ -152,7 +153,7 @@ def create_app() -> FastAPI:
                     "code": "internal_error",
                     "message": "An unexpected error occurred.",
                     "trace_id": trace_id,
-                }
+                },
             },
         )
 
