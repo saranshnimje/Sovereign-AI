@@ -15,7 +15,9 @@ services:
       - key: QDRANT_API_KEY
         value: placeholder
       - key: FRONTEND_ORIGIN
-        value: https://placeholder.vercel.app
+        value: https://sovereign-ai-igkz.vercel.app
+      - key: FRONTEND_ORIGINS
+        value: https://sovereign-ai-igkz.vercel.app
       - key: OLLAMA_URL
         value: ""
       - key: DATA_DIR
