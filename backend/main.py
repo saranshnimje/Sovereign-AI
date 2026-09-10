@@ -20,22 +20,15 @@ from routers import (
     knowledge_bases, agents, tools, incidents, data, approvals,
 )
 
-# ------------------------------------------------------------------
-# Logging setup
-# ------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = structlog.get_logger()
 
 
-# ------------------------------------------------------------------
-# Lifespan: startup / shutdown
-# ------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     logger.info("Starting Sovereign AI Workbench", ollama=settings.ollama_url, qdrant=settings.qdrant_url)
 
-    # Ensure data directories exist (derived from settings.data_dir)
     import os
     from pathlib import Path
     data_dir = Path(settings.data_dir)
@@ -50,9 +43,6 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-# ------------------------------------------------------------------
-# App factory
-# ------------------------------------------------------------------
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -66,15 +56,29 @@ def create_app() -> FastAPI:
     )
 
     # ---- CORS ----
+    # FRONTEND_ORIGINS is a comma-separated allowlist. FRONTEND_ORIGIN remains
+    # supported as a backward-compatible fallback for existing deployments.
+    configured_origins = settings.frontend_origins.strip()
+    if configured_origins:
+        frontend_origins = [origin.strip().rstrip("/") for origin in configured_origins.split(",") if origin.strip()]
+    else:
+        frontend_origins = [settings.frontend_origin.strip().rstrip("/")]
+
+    # Keep local development origins available while production origins remain
+    # explicitly controlled by the environment variable above.
+    allowed_origins = list(dict.fromkeys(frontend_origins + [
+        "http://localhost:5173",
+        "http://localhost",
+    ]))
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.frontend_origin, "http://localhost:5173", "http://localhost"],
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
     )
 
-    # ---- Request ID middleware ----
     class RequestIDMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
@@ -85,7 +89,6 @@ def create_app() -> FastAPI:
 
     app.add_middleware(RequestIDMiddleware)
 
-    # ---- Security headers ----
     class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             response = await call_next(request)
@@ -97,7 +100,6 @@ def create_app() -> FastAPI:
 
     app.add_middleware(SecurityHeadersMiddleware)
 
-    # ---- Routers ----
     prefix = "/api/v1"
     app.include_router(auth.router,            prefix=f"{prefix}/auth")
     app.include_router(chat.router,            prefix=f"{prefix}/chat")
@@ -110,14 +112,11 @@ def create_app() -> FastAPI:
     app.include_router(agents.router,          prefix=f"{prefix}/agents")
     app.include_router(tools.router,           prefix=f"{prefix}/tools")
     app.include_router(incidents.router,       prefix=f"{prefix}/incidents")
-    app.include_router(data.router,            prefix=f"{prefix}/data")
-    app.include_router(approvals.router,       prefix=f"{prefix}/approvals")
+    app.include_router(data.router,             prefix=f"{prefix}/data")
+    app.include_router(approvals.router,        prefix=f"{prefix}/approvals")
 
-    # ---- Exception handlers ----
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError):
-        # Pydantic v2 puts a raw Exception object in error['ctx']['error'] which
-        # is not JSON-serialisable. Strip it down to string form.
         def _clean(errors: list) -> list:
             cleaned = []
             for e in errors:
@@ -125,7 +124,6 @@ def create_app() -> FastAPI:
                 if "ctx" in e:
                     ctx = {k: str(v) for k, v in e["ctx"].items()}
                     entry["ctx"] = ctx
-                # loc is a tuple — make it a list for JSON
                 if "loc" in entry:
                     entry["loc"] = list(entry["loc"])
                 cleaned.append(entry)
