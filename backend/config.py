@@ -20,12 +20,9 @@ def _resolve_data_dir() -> str:
     env_val = os.environ.get("DATA_DIR", "").strip()
     if env_val:
         return env_val
-    # Inside Docker the path exists; outside it may not.
-    # Fall back to a local ./data directory for non-Docker dev.
     docker_path = "/app/data"
     if os.path.isdir(docker_path) or os.environ.get("RUNNING_IN_DOCKER"):
         return docker_path
-    # Local development fallback — relative to project root
     return str(Path(__file__).parent.parent / "data")
 
 
@@ -35,23 +32,22 @@ _DATA_DIR = _resolve_data_dir()
 class Settings(BaseSettings):
     # ---- Core ----
     secret_key: str = "change-me-in-production-use-32-random-bytes"
-    # deployment mode: "development" (permissive) | "production" (fail-fast on insecure secrets)
     environment: str = "development"
-    # DATA_DIR lets operators override where all persistent files live.
-    # Docker: /app/data (volume-mounted).  Local dev: auto-detected.
     data_dir: str = _DATA_DIR
     log_level: str = "INFO"
 
     # ---- Database ----
-    # If DATABASE_URL is set explicitly it takes precedence.
-    # Otherwise constructed from data_dir so it moves with the volume.
     database_url: str = f"sqlite+aiosqlite:///{_DATA_DIR}/sqlite/sovereign.db"
 
     # ---- External services ----
     qdrant_url: str = "http://qdrant:6333"
     qdrant_api_key: str = ""
     ollama_url: str = "http://host.docker.internal:11434"
+
+    # FRONTEND_ORIGIN is retained for backward compatibility.
+    # FRONTEND_ORIGINS can contain a comma-separated allowlist of origins.
     frontend_origin: str = "http://localhost:5173"
+    frontend_origins: str = ""
 
     # ---- Auth ----
     jwt_algorithm: str = "HS256"
@@ -82,7 +78,7 @@ class Settings(BaseSettings):
     # ---- Agent ----
     default_max_iterations: int = 50
     default_max_tool_calls: int = 30
-    default_max_execution_time_s: int = 600  # 10 minutes
+    default_max_execution_time_s: int = 600
     default_approval_risk_level: str = "high"
     approval_timeout_minutes: int = 5
     agent_max_subagent_depth: int = 10
@@ -97,11 +93,9 @@ class Settings(BaseSettings):
     sandbox_image: str = "python:3.11-slim"
     sandbox_timeout_s: int = 30
     sandbox_mem_limit_mb: int = 256
-    sandbox_cpu_quota: int = 50000  # 50% of one CPU
+    sandbox_cpu_quota: int = 50000
 
-    # ---- Rate limiting (in-process sliding window, per client IP) ----
-    # Disable with RATE_LIMIT_ENABLED=false. Limits are requests/minute/IP.
-    # NOTE: per-process scope — multiple uvicorn workers each enforce their own bucket.
+    # ---- Rate limiting ----
     rate_limit_enabled: bool = True
     rate_limit_auth_per_min: int = 30
     rate_limit_upload_per_min: int = 30
@@ -110,14 +104,11 @@ class Settings(BaseSettings):
     # ---- Audit ----
     audit_retention_days: int = 365
 
-    # ---- AI Models (defaults shown in .env.example) ----
+    # ---- AI Models ----
     default_chat_model: str = "llama3.2:3b"
-    # Local vision-capable Ollama model for inspection images (e.g. "llava:7b").
-    # EMPTY means vision is NOT configured — endpoints must then report
-    # "Vision analysis unavailable" honestly instead of guessing.
     default_vision_model: str = ""
 
-    # ---- Derived paths (read-only properties) ----
+    # ---- Derived paths ----
     @property
     def upload_dir(self) -> str:
         return str(Path(self.data_dir) / "uploads")
@@ -142,7 +133,6 @@ class Settings(BaseSettings):
     )
 
 
-# Secrets that must never reach production
 _INSECURE_SECRET_MARKERS = (
     "change-me",
     "your-secret-key-here",
@@ -152,13 +142,7 @@ _INSECURE_SECRET_MARKERS = (
 
 
 def _validate_production_secrets(settings: "Settings") -> None:
-    """
-    Fail-fast guard: refuse to boot in production with insecure secrets.
-
-    Development is explicitly permitted to use documented defaults.
-    Production requires a real, high-entropy SECRET_KEY — the application
-    will NOT silently generate or fall back to an insecure one.
-    """
+    """Refuse to boot in production with insecure secrets."""
     if settings.environment.strip().lower() != "production":
         return
 
