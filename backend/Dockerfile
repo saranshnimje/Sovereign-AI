@@ -47,5 +47,9 @@ USER sovereign
 
 EXPOSE 8000
 
-# Run Alembic migrations then start server
-CMD ["sh", "-c", "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1"]
+# Migrations are handled idempotently at startup by migration_runner.py
+# inside the app lifespan — NOT by alembic CLI in the shell, because the
+# Neon database was bootstrapped via create_all (init_db) and has no
+# alembic_version history.  Running "alembic upgrade head" here would try
+# to re-create the baseline tables and crash with DuplicateTableError.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
