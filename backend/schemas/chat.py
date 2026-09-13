@@ -21,11 +21,11 @@ class ConversationResponse(BaseModel):
     updated_at: datetime
     message_count: int = 0
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
 
 class MessageCreate(BaseModel):
-    model_config = ConfigDict(extra="allow")   # agent-mode extras: tool_mode/tools/plugin_mode
+    model_config = ConfigDict(extra="allow", protected_namespaces=())   # agent-mode extras: tool_mode/tools/plugin_mode
     content: str
     model_name: str | None = None
     # Provider whose connection should serve this message. When omitted the

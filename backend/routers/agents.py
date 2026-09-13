@@ -3,8 +3,10 @@ Agent run management router.
 """
 import json
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,11 +14,23 @@ from database import get_db
 from dependencies import get_current_user, require_role
 from models.agent import AgentRun, ToolCall
 from models.user import User
-from schemas.agent import AgentRunDetail, AgentRunResponse, ToolCallResponse
+from schemas.agent import AgentRunCreate, AgentRunDetail, AgentRunResponse, ToolCallResponse
+from services.tool_catalog import ToolCatalogService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["agents"])
+
+
+class PlanRequest(BaseModel):
+    goal: str = Field(..., min_length=1)
+
+    @field_validator("goal")
+    @classmethod
+    def goal_must_not_be_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Goal must not be empty or whitespace-only")
+        return v
 
 
 @router.get("/runs")
@@ -112,3 +126,78 @@ async def cancel_agent_run(
     run.status = "cancelled"
     await db.flush()
     return {"detail": "Agent run cancelled", "run_id": run_id}
+
+
+# ------------------------------------------------------------------
+# Create agent run (analyst+ only)
+# ------------------------------------------------------------------
+
+@router.post("/runs", status_code=201)
+async def create_agent_run(
+    data: AgentRunCreate,
+    _user: User = Depends(require_role("analyst")),
+    db: AsyncSession = Depends(get_db),
+):
+    # Validate KB ownership if kb_ids provided
+    if data.kb_ids:
+        from models.knowledge_base import KnowledgeBase
+
+        for kb_id in data.kb_ids:
+            kb = await db.get(KnowledgeBase, kb_id)
+            if kb is None or (kb.owner_id != _user.id and _user.role != "admin"):
+                raise HTTPException(404, "Knowledge base not found")
+
+    run = AgentRun(
+        goal=data.goal,
+        user_id=_user.id,
+        model_name=data.model_name,
+        allowed_tools=json.dumps(data.allowed_tools) if data.allowed_tools else None,
+        kb_ids=json.dumps(data.kb_ids) if data.kb_ids else None,
+        max_iterations=data.max_iterations,
+        status="pending",
+    )
+    db.add(run)
+    await db.flush()
+    await db.refresh(run)
+    return {
+        "id": run.id,
+        "goal": run.goal,
+        "status": run.status,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+    }
+
+
+# ------------------------------------------------------------------
+# Task planner (requires auth)
+# ------------------------------------------------------------------
+
+@router.post("/plan")
+async def plan_task(
+    data: PlanRequest,
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ToolCatalogService(db)
+    result = await svc.plan_task(data.goal.strip(), _user.role)
+    return result
+
+
+# ------------------------------------------------------------------
+# Capabilities (requires auth)
+# ------------------------------------------------------------------
+
+@router.get("/capabilities")
+async def get_capabilities(
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ToolCatalogService(db)
+    all_tools = await svc.list_tools()
+    tools = [t for t in all_tools if t.get("enabled")]
+    all_plugins = await svc.list_plugins()
+    plugins = [p for p in all_plugins if p.get("enabled")]
+    return {
+        "models": [],
+        "tools": tools,
+        "plugins": plugins,
+    }

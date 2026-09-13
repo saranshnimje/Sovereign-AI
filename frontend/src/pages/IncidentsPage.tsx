@@ -4,7 +4,7 @@ import { useUIStore } from '../stores/uiStore'
 import Badge from '../components/ui/Badge'
 
 const STATUS_COLORS: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
-  open: 'danger', investigating: 'warning', resolved: 'success', closed: 'info',
+  created: 'info', analyzing: 'warning', completed: 'success', failed: 'danger',
 }
 
 export default function IncidentsPage() {
@@ -71,7 +71,7 @@ export default function IncidentsPage() {
       </div>
 
       <div className="flex gap-2 flex-wrap">
-        {['', 'open', 'investigating', 'resolved', 'closed'].map(s => (
+        {['', 'created', 'analyzing', 'completed', 'failed'].map(s => (
           <button key={s} onClick={() => setStatusFilter(s)}
             className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${statusFilter === s ? 'bg-cyan-600 text-white border-cyan-600' : 'border-surface-border text-neutral-400 hover:bg-surface-muted'}`}>
             {s || 'All'}
@@ -123,7 +123,7 @@ export default function IncidentsPage() {
                     <span>{timeAgo(inc.created_at)}</span>
                   </div>
                 </div>
-                {inc.status !== 'resolved' && inc.status !== 'closed' && (
+                {inc.status !== 'completed' && inc.status !== 'failed' && (
                   <button onClick={(e) => { e.stopPropagation(); handleInvestigate(inc) }} disabled={investigating}
                     className="text-xs px-3 py-1.5 border border-cyan-600/50 text-cyan-400 rounded-lg hover:bg-cyan-500/10 disabled:opacity-50">
                     {investigating ? 'Investigating...' : 'Investigate'}

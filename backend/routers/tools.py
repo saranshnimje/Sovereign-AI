@@ -1,7 +1,6 @@
 """
-Tool and plugin management router.
+Tool management router — list, toggle, configure, and probe tools.
 """
-import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,23 +17,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["tools"])
 
 
-class ToolToggle(BaseModel):
-    enabled: bool
-
-
 class ToolConfigUpdate(BaseModel):
     config: dict
-
-
-class PluginToggle(BaseModel):
-    enabled: bool
 
 
 def _catalog(db: AsyncSession) -> ToolCatalogService:
     return ToolCatalogService(db)
 
 
-@router.get("/")
+# ------------------------------------------------------------------
+# List tools (requires auth)
+# ------------------------------------------------------------------
+
+@router.get("")
 async def list_tools(
     _user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -43,25 +38,60 @@ async def list_tools(
     return await svc.list_tools()
 
 
-@router.patch("/{tool_name}")
-async def toggle_tool(
+# ------------------------------------------------------------------
+# Toggle individual tool (admin only)
+# ------------------------------------------------------------------
+
+@router.post("/{tool_name}/disable")
+async def disable_tool(
     tool_name: str,
-    data: ToolToggle,
-    admin: User = Depends(require_role("admin")),
+    _admin: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     svc = _catalog(db)
     try:
-        return await svc.set_tool_enabled(tool_name, data.enabled)
+        return await svc.set_tool_enabled(tool_name, False)
     except KeyError:
         raise HTTPException(404, f"Tool '{tool_name}' not found")
 
+
+@router.post("/{tool_name}/enable")
+async def enable_tool(
+    tool_name: str,
+    _admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _catalog(db)
+    try:
+        return await svc.set_tool_enabled(tool_name, True)
+    except KeyError:
+        raise HTTPException(404, f"Tool '{tool_name}' not found")
+
+
+@router.patch("/{tool_name}")
+async def toggle_tool(
+    tool_name: str,
+    data: dict,
+    _admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _catalog(db)
+    enabled = data.get("enabled", True)
+    try:
+        return await svc.set_tool_enabled(tool_name, enabled)
+    except KeyError:
+        raise HTTPException(404, f"Tool '{tool_name}' not found")
+
+
+# ------------------------------------------------------------------
+# Tool config (admin only)
+# ------------------------------------------------------------------
 
 @router.put("/{tool_name}/config")
 async def update_tool_config(
     tool_name: str,
     data: ToolConfigUpdate,
-    admin: User = Depends(require_role("admin")),
+    _admin: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     svc = _catalog(db)
@@ -71,24 +101,44 @@ async def update_tool_config(
         raise HTTPException(404, f"Tool '{tool_name}' not found")
 
 
-@router.get("/plugins")
-async def list_plugins(
-    _user=Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    svc = _catalog(db)
-    return await svc.list_plugins()
+# ------------------------------------------------------------------
+# Tool test probe (admin only)
+# ------------------------------------------------------------------
+
+TOOL_PROBES = {
+    "calculator": {"expression": "6 * 7"},
+    "time_now": {},
+    "tool_discovery": {},
+    "web_search": {"query": "test query"},
+    "web_fetch": {"url": "http://example.com"},
+    "search_kb": {"query": "test"},
+    "file_read": {"path": "test.txt"},
+    "file_list": {"path": "."},
+}
 
 
-@router.patch("/plugins/{plugin_id}")
-async def toggle_plugin(
-    plugin_id: str,
-    data: PluginToggle,
-    admin: User = Depends(require_role("admin")),
+@router.post("/{tool_name}/test")
+async def test_tool(
+    tool_name: str,
+    _admin: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
+    from tools.registry import get_registry
+
+    reg = get_registry()
     svc = _catalog(db)
+    await svc.sync()
+
+    tool_def = reg.get_definition_any_state(tool_name)
+    if tool_def is None:
+        raise HTTPException(404, f"Tool '{tool_name}' not found")
+    if not tool_def.enabled:
+        raise HTTPException(409, f"Tool '{tool_name}' is disabled")
+
+    probe_input = TOOL_PROBES.get(tool_name, {})
     try:
-        return await svc.set_plugin_enabled(plugin_id, data.enabled)
-    except KeyError:
-        raise HTTPException(404, f"Plugin '{plugin_id}' not found")
+        validated = reg.validate_input(tool_def, probe_input)
+        result = await reg.execute(tool_def, validated, context={"db": db})
+        return {"success": True, "result": result}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}

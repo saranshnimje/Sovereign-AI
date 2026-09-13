@@ -17,7 +17,8 @@ from config import get_settings
 from database import init_db
 from routers import (
     auth, chat, models, system, audit, providers, settings as settings_router,
-    knowledge_bases, agents, tools, incidents, data, approvals,
+    knowledge_bases, agents, tools, plugins, incidents, data, approvals, documents,
+    sensor_analysis, vision,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -45,13 +46,14 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    is_production = settings.environment.strip().lower() == "production"
 
     app = FastAPI(
         title="Sovereign AI Workbench API",
         version="1.0.0",
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
+        docs_url=None if is_production else "/api/docs",
+        redoc_url=None if is_production else "/api/redoc",
+        openapi_url=None if is_production else "/api/openapi.json",
         lifespan=lifespan,
     )
 
@@ -67,10 +69,11 @@ def create_app() -> FastAPI:
 
     # Keep local development origins available while production origins remain
     # explicitly controlled by the environment variable above.
-    allowed_origins = list(dict.fromkeys(frontend_origins + [
+    dev_origins = [] if is_production else [
         "http://localhost:5173",
         "http://localhost",
-    ]))
+    ]
+    allowed_origins = list(dict.fromkeys(frontend_origins + dev_origins))
 
     app.add_middleware(
         CORSMiddleware,
@@ -112,9 +115,13 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_bases.router, prefix=f"{prefix}/knowledge-bases")
     app.include_router(agents.router,          prefix=f"{prefix}/agents")
     app.include_router(tools.router,           prefix=f"{prefix}/tools")
+    app.include_router(plugins.router,         prefix=f"{prefix}/plugins")
     app.include_router(incidents.router,       prefix=f"{prefix}/incidents")
     app.include_router(data.router,             prefix=f"{prefix}/data")
     app.include_router(approvals.router,        prefix=f"{prefix}/approvals")
+    app.include_router(documents.router,        prefix=f"{prefix}/documents")
+    app.include_router(sensor_analysis.router,  prefix=f"{prefix}/sensor-analyses")
+    app.include_router(vision.router,           prefix=f"{prefix}")
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError):

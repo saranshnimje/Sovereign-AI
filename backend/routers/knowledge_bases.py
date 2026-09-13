@@ -9,20 +9,26 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from dependencies import get_current_user, get_llm_client, require_role
+from dependencies import AnalystRequired, get_current_user, get_llm_client, require_role
 from models.knowledge_base import Document, KnowledgeBase
 from models.user import User
 from schemas.document import (
     DocumentResponse,
     DocumentStatusResponse,
     KBCreate,
+    KBQueryRequest,
     KBResponse,
 )
 from services.audit_service import AuditService
 from services.document_service import DocumentService
 from services.embedding_service import EmbeddingService
+from services.kb_access import ensure_kb_access, get_kb_checked
 from services.knowledge_base_service import KnowledgeBaseService
+from services.llm_client import OllamaClient
 from services.qdrant_service import QdrantService
+from config import get_settings
+from services.rag_service import RagService
+from services.settings_service import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -54,17 +60,17 @@ async def list_knowledge_bases(
     return kbs
 
 
-@router.post("/", response_model=KBResponse)
+@router.post("/", response_model=KBResponse, status_code=201)
 async def create_knowledge_base(
     data: KBCreate,
     request: Request,
-    admin: User = Depends(require_role("admin")),
+    analyst: User = AnalystRequired,
     db: AsyncSession = Depends(get_db),
 ):
     svc = _kb_service(db)
     client_ip = request.client.host if request.client else None
     kb = await svc.create(
-        owner_id=admin.id,
+        owner_id=analyst.id,
         name=data.name,
         description=data.description,
         embedding_model=data.embedding_model,
@@ -76,24 +82,75 @@ async def create_knowledge_base(
 @router.get("/{kb_id}", response_model=KBResponse)
 async def get_knowledge_base(
     kb_id: str,
-    _user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Tenancy: foreign or missing KB → identical 404 (no existence leakage)
     svc = _kb_service(db)
-    return await svc.get(kb_id)
+    return await get_kb_checked(db, kb_id, user)
 
 
 @router.delete("/{kb_id}")
 async def delete_knowledge_base(
     kb_id: str,
     request: Request,
-    admin: User = Depends(require_role("admin")),
+    user: User = AnalystRequired,
     db: AsyncSession = Depends(get_db),
 ):
+    # Owner or admin may delete; foreign/unknown → 404
     svc = _kb_service(db)
+    kb = await get_kb_checked(db, kb_id, user, write=True)
     client_ip = request.client.host if request.client else None
-    await svc.delete(kb_id, user_id=admin.id, client_ip=client_ip)
+    await svc.delete(kb_id, user_id=user.id, client_ip=client_ip)
     return {"detail": "Knowledge base deleted"}
+
+
+@router.post("/{kb_id}/query")
+async def query_knowledge_base(
+    kb_id: str,
+    data: KBQueryRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    RAG query over a KB the user may access. Foreign/unknown KB → 404.
+    Returns answer, sources (with chunk/dedup metadata) and low_confidence.
+    """
+    kb = await get_kb_checked(db, kb_id, user)
+
+    llm = OllamaClient(get_settings().ollama_url)
+    embed_svc = EmbeddingService(llm)
+    qdrant_svc = QdrantService()
+    rag_svc = RagService(llm, embed_svc, qdrant_svc)
+
+    settings = load_settings()
+    result = await rag_svc.query(
+        kb_id=kb_id,
+        embedding_model=kb.embedding_model,
+        chat_model=data.model_name or getattr(settings, "default_chat_model", None) or "llama3",
+        query=data.query,
+        top_k=data.top_k,
+        score_threshold=data.score_threshold,
+        generate_answer=data.generate_answer,
+    )
+    return {
+        "answer": result.answer,
+        "sources": [
+            {
+                "chunk_id": s.chunk_id,
+                "doc_id": s.doc_id,
+                "filename": s.filename,
+                "page_number": s.page_number,
+                "content": s.content,
+                "score": s.score,
+            }
+            for s in result.sources
+        ],
+        "low_confidence": result.low_confidence,
+        "query_embedding_ms": result.query_embedding_ms,
+        "retrieval_ms": result.retrieval_ms,
+        "generation_ms": result.generation_ms,
+    }
 
 
 # ------------------------------------------------------------------

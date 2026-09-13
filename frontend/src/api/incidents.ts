@@ -11,7 +11,7 @@ export interface Incident {
   risk_json: string | null
   ai_analysis: string | null
   recommendation_action: string | null
-  status: 'open' | 'investigating' | 'resolved' | 'closed'
+  status: 'created' | 'analyzing' | 'completed' | 'failed'
   created_at: string
   updated_at: string
 }

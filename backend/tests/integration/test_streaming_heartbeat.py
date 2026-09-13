@@ -114,7 +114,7 @@ async def test_heartbeat_emitted_during_slow_llm(auth_client: AsyncClient):
          patch("services.llm_client.OllamaClient.chat", new=slow_llm.chat):
         resp = await auth_client.post(
             f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "Hello", "model_name": "test-model"},
+            json={"content": "Analyze the bearing vibration data for anomalies", "model_name": "test-model"},
             headers={"Accept": "text/event-stream"},
             timeout=60.0,
         )

@@ -340,7 +340,7 @@ async def test_list_endpoints_filter_by_owner(client: AsyncClient):
 
     # User B's incident list must not contain User A's incidents
     inc_list = (await client.get("/api/v1/incidents", headers=b_headers)).json()
-    assert all(i.get("title") != "Admin incident" for i in inc_list), "User B can see User A's incident in list"
+    assert all(i.get("title") != "Admin incident" for i in inc_list["items"]), "User B can see User A's incident in list"
 
     # User B's conversation list must be empty (or only their own)
     conv_list = (await client.get("/api/v1/chat/conversations", headers=b_headers)).json()

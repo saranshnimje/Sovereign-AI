@@ -35,8 +35,8 @@ class ToolCallResponse(BaseModel):
     id: str
     step_number: int
     tool_name: str
-    input_data: dict
-    output_data: dict | None
+    input_json: str
+    output_json: str | None
     status: str
     exit_code: int | None
     duration_ms: int | None
@@ -60,7 +60,7 @@ class AgentRunResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
 
 class AgentRunDetail(AgentRunResponse):

@@ -89,6 +89,38 @@ class BaseLLMProvider(ABC):
     def _retry_delays() -> list[float]:
         return [0.0, 1.0, 2.0]
 
+    @staticmethod
+    def _is_retryable(exc: Exception) -> bool:
+        """Return True for transient errors safe to retry."""
+        if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in (429, 500, 502, 503)
+        return False
+
+    async def _retry_request(self, fn, attempts: int = 3):
+        """Execute fn() with retries on transient errors. Returns httpx.Response."""
+        last_exc: Exception | None = None
+        for delay in [0.0, 1.0, 2.0][:attempts]:
+            try:
+                if delay:
+                    await asyncio.sleep(delay)
+                resp = await fn()
+                resp.raise_for_status()
+                return resp
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_retryable(exc):
+                    break
+        if isinstance(last_exc, httpx.HTTPStatusError):
+            body = ""
+            try:
+                body = last_exc.response.text[:500]
+            except Exception:
+                pass
+            raise ModelUnavailableError(f"{last_exc} | Response: {body}") from last_exc
+        raise ModelUnavailableError(str(last_exc)) from last_exc
+
 
 # ── Ollama Provider ────────────────────────────────────────────
 
@@ -486,21 +518,11 @@ class AnthropicProvider(BaseLLMProvider):
         if stream:
             return self._stream_chat(model, payload)
 
-        try:
-            resp = await self._get_client().post(
+        resp = await self._retry_request(
+            lambda: self._get_client().post(
                 f"{self._api_root()}/messages", json=payload, headers=self._headers()
             )
-            resp.raise_for_status()
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            raise ModelUnavailableError(str(exc)) from exc
-        except httpx.HTTPStatusError as exc:
-            body = ""
-            if exc.response is not None:
-                try:
-                    body = exc.response.text[:500]
-                except Exception:
-                    pass
-            raise ModelUnavailableError(f"{exc} | Response: {body}") from exc
+        )
 
         data = resp.json()
         content_blocks = data.get("content", [])
@@ -664,19 +686,9 @@ class GeminiProvider(BaseLLMProvider):
         if stream:
             return self._stream_chat(model, payload)
 
-        try:
-            resp = await self._get_client().post(self._url(model), json=payload)
-            resp.raise_for_status()
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            raise ModelUnavailableError(str(exc)) from exc
-        except httpx.HTTPStatusError as exc:
-            body = ""
-            if exc.response is not None:
-                try:
-                    body = exc.response.text[:500]
-                except Exception:
-                    pass
-            raise ModelUnavailableError(f"{exc} | Response: {body}") from exc
+        resp = await self._retry_request(
+            lambda: self._get_client().post(self._url(model), json=payload)
+        )
 
         data = resp.json()
         candidates = data.get("candidates", [{}])
@@ -834,21 +846,11 @@ class CohereProvider(BaseLLMProvider):
         if stream:
             return self._stream_chat(model, payload)
 
-        try:
-            resp = await self._get_client().post(
+        resp = await self._retry_request(
+            lambda: self._get_client().post(
                 "/chat", json=payload, headers=self._headers()
             )
-            resp.raise_for_status()
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            raise ModelUnavailableError(str(exc)) from exc
-        except httpx.HTTPStatusError as exc:
-            body = ""
-            if exc.response is not None:
-                try:
-                    body = exc.response.text[:500]
-                except Exception:
-                    pass
-            raise ModelUnavailableError(f"{exc} | Response: {body}") from exc
+        )
 
         data = resp.json()
         text = data.get("message", {}).get("content", [{"text": ""}])[0].get("text", "")

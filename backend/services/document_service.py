@@ -96,8 +96,21 @@ class DocumentService:
         Validate, save, and create a Document record (status=pending).
         Actual processing is enqueued as a FastAPI background task.
         """
-        # Read file content
-        content = await file.read()
+        # Streaming size guard — read in chunks to avoid OOM on huge uploads
+        max_bytes = load_settings().max_upload_size_mb * 1024 * 1024
+        chunks = []
+        size = 0
+        while chunk := await file.read(64 * 1024):
+            size += len(chunk)
+            if size > max_bytes:
+                raise ValueError(
+                    f"File exceeds {load_settings().max_upload_size_mb} MB limit"
+                )
+            chunks.append(chunk)
+        content = b"".join(chunks)
+
+        if len(content) == 0:
+            raise ValueError("File is empty")
 
         # Validate
         try:

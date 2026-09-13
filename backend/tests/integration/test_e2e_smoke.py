@@ -229,7 +229,7 @@ class TestE2ESmokeWorkflow:
         # List incidents
         r = await client.get("/api/v1/incidents", headers=headers)
         assert r.status_code == 200
-        assert any(i["id"] == inc_id for i in r.json())
+        assert any(i["id"] == inc_id for i in r.json()["items"])
 
         # Run investigation with mocked RAG + LLM
         with patch("services.embedding_service.EmbeddingService.embed_query",

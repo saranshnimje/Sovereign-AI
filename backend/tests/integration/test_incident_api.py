@@ -165,7 +165,7 @@ class TestCreationAndAccess:
             resp = await getattr(client, method)(path, headers=peer)
             assert resp.status_code == 404, f"{method} {path} → {resp.status_code}"
         listing = (await client.get("/api/v1/incidents", headers=peer)).json()
-        assert all(i["id"] != iid for i in listing)
+        assert all(i["id"] != iid for i in listing["items"])
 
     @pytest.mark.asyncio
     async def test_attach_foreign_artifacts_rejected(self, client):

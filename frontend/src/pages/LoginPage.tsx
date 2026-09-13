@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { authApi } from '../api/auth'
+import { authApi, DemoUser } from '../api/auth'
 import { useAuthStore } from '../stores/authStore'
 import SovereignLogo from '../components/ui/SovereignLogo'
 
@@ -14,15 +14,26 @@ export default function LoginPage() {
   const [setupMode, setSetupMode] = useState(false)
   const [username, setUsername] = useState('')
 
-  // Demo/test credentials intentionally exposed for the prototype UI.
-  // Only explicitly-configured demo accounts are listed here — no real secrets.
-  const DEMO_CREDENTIALS = [
-    { email: 'admin@admin.com', password: 'admin12345678', role: 'admin' },
-    { email: 'e2e_analyst@test.com', password: 'Eg2_1ZmggndlNnagVGwc', role: 'analyst' },
-  ]
+  const [demoUsers, setDemoUsers] = useState<DemoUser[]>([])
+  const [demoLoading, setDemoLoading] = useState(true)
+  const [demoError, setDemoError] = useState('')
 
   useEffect(() => { if (accessToken) navigate('/') }, [accessToken])
-  useEffect(() => { authApi.setupStatus().then((s) => setSetupMode(s.setup_required)).catch(() => {}) }, [])
+
+  useEffect(() => {
+    authApi.setupStatus()
+      .then((s) => {
+        setSetupMode(s.setup_required)
+        if (!s.setup_required) {
+          setDemoLoading(true)
+          authApi.getDemoUsers()
+            .then(setDemoUsers)
+            .catch(() => setDemoError('Could not load demo accounts'))
+            .finally(() => setDemoLoading(false))
+        }
+      })
+      .catch(() => setDemoLoading(false))
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault(); setError(''); setLoading(true)
@@ -37,10 +48,11 @@ export default function LoginPage() {
   }
 
   // Fill the form with a demo user's credentials. Does NOT submit.
-  const useDemoCredentials = (demo: { email: string; password: string }) => {
+  const useDemoCredentials = (demo: DemoUser) => {
+    if (!demo.has_demo_password || !demo.demo_password) return
     setSetupMode(false)
     setEmail(demo.email)
-    setPassword(demo.password)
+    setPassword(demo.demo_password)
     setError('')
   }
 
@@ -122,35 +134,55 @@ export default function LoginPage() {
                   <span className="text-[10px] uppercase tracking-wider bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 rounded px-1.5 py-0.5">Prototype</span>
                 </div>
                 <p className="text-xs text-neutral-500 mb-3">These credentials are for the prototype/demo. Click <span className="text-neutral-300">Use Credentials</span> to fill the form (it won't sign you in automatically).</p>
-                <div className="overflow-hidden border border-surface-border rounded-lg">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="bg-surface text-neutral-400 text-left">
-                        <th className="px-3 py-2 font-medium">Email</th>
-                        <th className="px-3 py-2 font-medium">Password</th>
-                        <th className="px-3 py-2 font-medium">Role</th>
-                        <th className="px-3 py-2 font-medium text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-surface-border">
-                      {DEMO_CREDENTIALS.map((demo) => (
-                        <tr key={demo.email} className="bg-surface-raised/40">
-                          <td className="px-3 py-2 text-neutral-200 break-all">{demo.email}</td>
-                          <td className="px-3 py-2 text-neutral-300">{demo.password}</td>
-                          <td className="px-3 py-2">
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-[10px] uppercase tracking-wide">{demo.role}</span>
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            <button type="button" onClick={() => useDemoCredentials(demo)}
-                              className="text-cyan-400 hover:text-cyan-300 font-medium transition-colors">
-                              Use Credentials
-                            </button>
-                          </td>
+
+                {demoLoading ? (
+                  <div className="flex items-center justify-center py-6 text-neutral-500 text-xs gap-2">
+                    <span className="animate-spin h-3.5 w-3.5 border-2 border-neutral-500 border-t-transparent rounded-full" />
+                    Loading demo accounts…
+                  </div>
+                ) : demoError ? (
+                  <div className="py-4 text-center text-xs text-danger-500">{demoError}</div>
+                ) : demoUsers.length === 0 ? (
+                  <div className="py-4 text-center text-xs text-neutral-500">No demo accounts available.</div>
+                ) : (
+                  <div className="overflow-hidden border border-surface-border rounded-lg">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="bg-surface text-neutral-400 text-left">
+                          <th className="px-3 py-2 font-medium">Email</th>
+                          <th className="px-3 py-2 font-medium">Password</th>
+                          <th className="px-3 py-2 font-medium">Role</th>
+                          <th className="px-3 py-2 font-medium text-right">Action</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody className="divide-y divide-surface-border">
+                        {demoUsers.map((demo) => (
+                          <tr key={demo.email} className="bg-surface-raised/40">
+                            <td className="px-3 py-2 text-neutral-200 break-all">{demo.email}</td>
+                            <td className="px-3 py-2 text-neutral-300">
+                              {demo.has_demo_password ? demo.demo_password : (
+                                <span className="text-neutral-500 italic">Password unavailable</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-[10px] uppercase tracking-wide">{demo.role}</span>
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              {demo.has_demo_password ? (
+                                <button type="button" onClick={() => useDemoCredentials(demo)}
+                                  className="text-cyan-400 hover:text-cyan-300 font-medium transition-colors">
+                                  Use Credentials
+                                </button>
+                              ) : (
+                                <span className="text-neutral-600 text-[10px]">N/A</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </>
           )}

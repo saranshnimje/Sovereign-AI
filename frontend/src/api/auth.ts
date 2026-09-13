@@ -9,6 +9,13 @@ export interface UserResponse {
   last_login: string | null; created_at: string
 }
 
+export interface DemoUser {
+  email: string
+  role: string
+  has_demo_password: boolean
+  demo_password: string | null
+}
+
 export const authApi = {
   login: (data: LoginRequest) =>
     api.post<TokenResponse>('/auth/login', data).then((r) => r.data),
@@ -27,4 +34,6 @@ export const authApi = {
 
   updateUser: (id: string, data: Partial<{ role: string; is_active: boolean }>) =>
     api.put<UserResponse>(`/auth/users/${id}`, data).then((r) => r.data),
+
+  getDemoUsers: () => api.get<DemoUser[]>('/auth/demo-users').then((r) => r.data),
 }

@@ -75,7 +75,75 @@ async def pending_approval_count(
         )
     )
     count = result.scalar_one()
-    return {"pending_count": count}
+    return {"count": count}
+
+
+# ------------------------------------------------------------------
+# List pending approvals (convenience alias)
+# ------------------------------------------------------------------
+
+@router.get("/pending")
+async def list_pending_approvals(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    query = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.status == "pending")
+        .order_by(ApprovalRequest.created_at.desc())
+    )
+    count_q = select(func.count()).select_from(ApprovalRequest).where(
+        ApprovalRequest.status == "pending"
+    )
+    total = (await db.execute(count_q)).scalar() or 0
+    result = await db.execute(query.offset(offset).limit(limit))
+    requests_list = list(result.scalars().all())
+    items = [
+        ApprovalResponse(
+            id=r.id,
+            agent_run_id=r.agent_run_id,
+            requester_id=r.requester_id,
+            operation=r.operation,
+            operation_detail=json.loads(r.operation_detail_json),
+            risk_level=r.risk_level,
+            status=r.status,
+            decided_by=r.decided_by,
+            decided_at=r.decided_at,
+            decision_note=r.decision_note,
+            expires_at=r.expires_at,
+            created_at=r.created_at,
+        )
+        for r in requests_list
+    ]
+    return {"items": items, "total": total}
+
+
+@router.get("/{approval_id}", response_model=ApprovalResponse)
+async def get_approval(
+    approval_id: str,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _svc(db)
+    req = await svc.get(approval_id)
+    if not req:
+        raise HTTPException(404, "Approval request not found")
+    return ApprovalResponse(
+        id=req.id,
+        agent_run_id=req.agent_run_id,
+        requester_id=req.requester_id,
+        operation=req.operation,
+        operation_detail=json.loads(req.operation_detail_json),
+        risk_level=req.risk_level,
+        status=req.status,
+        decided_by=req.decided_by,
+        decided_at=req.decided_at,
+        decision_note=req.decision_note,
+        expires_at=req.expires_at,
+        created_at=req.created_at,
+    )
 
 
 @router.post("/{approval_id}/approve", response_model=ApprovalResponse)

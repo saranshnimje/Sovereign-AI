@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from dependencies import get_current_user, require_role
 from models.user import User
-from schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse, UserUpdate
+from schemas.auth import DemoUserResponse, LoginRequest, RegisterRequest, TokenResponse, UserResponse, UserUpdate
 from services.audit_service import AuditService
 from services.auth_service import AuthService
 from utils.rate_limit import auth_rate_limit
@@ -174,3 +174,17 @@ async def setup_status(db: AsyncSession = Depends(get_db)):
     service = AuthService(db)
     count = await service.count_users()
     return {"setup_required": count == 0}
+
+
+# ------------------------------------------------------------------
+# Demo users (shown on the login page — no auth required)
+# ------------------------------------------------------------------
+@router.get("/demo-users", response_model=list[DemoUserResponse])
+async def demo_users(db: AsyncSession = Depends(get_db)):
+    """Return all active users with verified demo credentials.
+
+    This endpoint is unauthenticated because it is rendered on the
+    login page before the user has a session.
+    """
+    service = AuthService(db)
+    return await service.get_demo_users()

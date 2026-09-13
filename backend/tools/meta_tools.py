@@ -83,29 +83,22 @@ _TASK_PREFERENCE = {
 
 async def model_select_execute(data: ModelSelectInput, context: dict) -> dict:
     """Read-only listing of enabled discovered models. No capability invention."""
-    import asyncio
     from sqlalchemy import select
     from database import AsyncSessionLocal
     from models.provider_model import ProviderModel
     from models.provider import LLMProvider
 
-    def _query():
-        async def _run():
-            async with AsyncSessionLocal() as db:
-                res = await db.execute(
-                    select(ProviderModel, LLMProvider.name)
-                    .join(LLMProvider, LLMProvider.id == ProviderModel.provider_id)
-                    .where(ProviderModel.status == "available",
-                           ProviderModel.enabled.is_(True),
-                           LLMProvider.enabled.is_(True))
-                    .order_by(ProviderModel.provider_id, ProviderModel.model_id)
-                )
-                return [(r.model_id, r.family, pname) for r, pname in res.all()]
-        return asyncio.get_event_loop().run_until_complete(_run()) \
-            if False else asyncio.run(_run())
-
     try:
-        rows = _query()
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                select(ProviderModel, LLMProvider.name)
+                .join(LLMProvider, LLMProvider.id == ProviderModel.provider_id)
+                .where(ProviderModel.status == "available",
+                       ProviderModel.enabled.is_(True),
+                       LLMProvider.enabled.is_(True))
+                .order_by(ProviderModel.provider_id, ProviderModel.model_id)
+            )
+            rows = [(r.model_id, r.family, pname) for r, pname in res.all()]
     except Exception:
         return {"candidates": [], "note": "Model catalog unavailable"}
 

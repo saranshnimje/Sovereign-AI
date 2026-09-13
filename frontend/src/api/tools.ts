@@ -24,7 +24,7 @@ export const toolsApi = {
     api.patch<Tool>(`/tools/${name}`, { enabled }).then(r => r.data),
   setToolConfig: (name: string, config: Record<string, unknown>) =>
     api.put<Tool>(`/tools/${name}/config`, config).then(r => r.data),
-  listPlugins: () => api.get<Plugin[]>('/tools/plugins').then(r => r.data),
+  listPlugins: () => api.get<Plugin[]>('/plugins').then(r => r.data),
   setPluginEnabled: (id: string, enabled: boolean) =>
-    api.patch<Plugin>(`/tools/plugins/${id}`, { enabled }).then(r => r.data),
+    api.patch<Plugin>(`/plugins/${id}`, { enabled }).then(r => r.data),
 }

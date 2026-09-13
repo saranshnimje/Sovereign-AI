@@ -95,8 +95,9 @@ class TestUploadSecurity:
     @pytest.mark.asyncio
     async def test_unsupported_format_rejected(self, auth_client):
         iid = await _mk_incident(auth_client, {})
-        gif = b"GIF87a" + b"\x00" * 20
-        r = await _upload(auth_client, iid, content=gif, name="anim.gif")
+        # BMP is not in ALLOWED_MIME — should be rejected
+        bmp = b"BM" + b"\x00" * 20
+        r = await _upload(auth_client, iid, content=bmp, name="photo.bmp")
         assert r.status_code == 422
 
     @pytest.mark.asyncio
@@ -323,7 +324,7 @@ class TestIncidentIntegration:
     async def test_list_summary_does_not_leak_evidence(self, auth_client):
         """Incident list payloads carry no evidence/vision structures."""
         listing = (await auth_client.get("/api/v1/incidents")).json()
-        for item in listing:
+        for item in listing["items"]:
             forbidden = {"evidence", "risk", "ai_analysis", "result"}
             assert not (forbidden & set(item.keys()))
 

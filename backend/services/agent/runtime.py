@@ -1848,8 +1848,13 @@ class AgentRuntime:
                 "provided_arguments": tool_input,
             }
 
-        # 4. Approval gate (skipped in autonomous agent mode)
-        if not skip_approval and reg.requires_approval(tool):
+        # 4. Approval gate (skipped for low/medium risk in autonomous agent mode)
+        # High and critical risk tools ALWAYS require approval, even in autonomous mode.
+        # This prevents dangerous tools (e.g., terminal commands) from executing
+        # without human oversight.
+        from tools.registry import RISK_HIGH, RISK_CRITICAL
+        needs_approval = reg.requires_approval(tool)
+        if needs_approval and not skip_approval:
             from services.approval_service import ApprovalService
             approval_svc = ApprovalService(db)
             req = await approval_svc.create_request(
@@ -1873,6 +1878,13 @@ class AgentRuntime:
                 }
             if not approved:
                 return {"error": f"Approval denied: {note}"}
+        elif needs_approval and skip_approval and tool.risk_level in (RISK_HIGH, RISK_CRITICAL):
+            return {
+                "error": f"Tool '{tool_name}' requires human approval (risk={tool.risk_level})",
+                "failure_type": "FATAL",
+                "tool": tool_name,
+                "provided_arguments": tool_input,
+            }
 
         # 5. Build context with services tools need
         from types import SimpleNamespace

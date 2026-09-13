@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import get_settings
 from models.user import RefreshToken, User
-from schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
+from schemas.auth import (
+    DemoUserResponse,
+    LoginRequest,
+    RegisterRequest,
+    TokenResponse,
+    UserResponse,
+)
 
 # Common passwords blocklist (top subset — expand for production)
 COMMON_PASSWORDS = {
@@ -27,6 +33,18 @@ COMMON_PASSWORDS = {
     "welcome123456",
     "dragon123456!!",
     "master123456!!",
+}
+
+# Verified demo credentials — password is ONLY included for accounts
+# that have been explicitly confirmed to work against the live database.
+# This dict is server-side only; the API never returns raw passwords for
+# accounts not listed here.
+#
+# Only the Admin prototype account is a demo credential. All other
+# accounts should not exist in the prototype DB, and even if one does,
+# it is never exposed with a password.
+DEMO_CREDENTIALS: dict[str, str] = {
+    "admin@admin.com": "admin12345678",
 }
 
 
@@ -239,6 +257,37 @@ class AuthService:
     @staticmethod
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
+
+    # ------------------------------------------------------------------
+    # Demo users (login-page display)
+    # ------------------------------------------------------------------
+    async def get_demo_users(self) -> list[DemoUserResponse]:
+        """Return the Admin demo user for the login page.
+
+        Only the Admin account is a prototype demo credential. Non-admin
+        accounts are never returned, so the login page can only ever
+        display the Admin user. Passwords are only included for accounts
+        in ``DEMO_CREDENTIALS`` (server-side, explicitly verified).
+
+        In production, demo credentials are never exposed.
+        """
+        if self.settings.environment.strip().lower() == "production":
+            return []
+        result = await self.db.execute(
+            select(User)
+            .where(User.is_active == True, User.role == "admin")  # noqa: E712
+            .order_by(User.created_at)
+        )
+        users = list(result.scalars().all())
+        return [
+            DemoUserResponse(
+                email=u.email,
+                role=u.role,
+                has_demo_password=(u.email in DEMO_CREDENTIALS),
+                demo_password=DEMO_CREDENTIALS.get(u.email),
+            )
+            for u in users
+        ]
 
     async def _get_by_email(self, email: str) -> User | None:
         result = await self.db.execute(select(User).where(User.email == email))

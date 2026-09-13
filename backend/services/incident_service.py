@@ -173,6 +173,7 @@ def build_evidence(
         "documents": documents,
         "sensors": sensors,
         "trends": trends,
+        "vision": [],
         "insufficient_evidence": insufficient,
         "kb_had_no_hits": len(documents) == 0,
     }
@@ -282,7 +283,7 @@ def extract_action(ai_text: str | None) -> str | None:
 # IncidentService class — CRUD + investigation orchestration
 # ----------------------------------------------------------------------
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -381,22 +382,30 @@ class IncidentService:
         """
         Run AI investigation on an incident.
         Gathers evidence, computes risk, calls LLM, stores results.
+        LLM failure is non-fatal: deterministic parts are always stored.
         """
-        from services.knowledge_base_service import KnowledgeBaseService
         from services.qdrant_service import QdrantService
         from services.rag_service import RagService
         from services.embedding_service import EmbeddingService
-        from services.llm_client import OllamaClient
-        from services.settings_service import load_settings
+        from services.llm_client import OllamaClient, ChatMessage, ModelUnavailableError
+        from config import get_settings
         from models.sensor import SensorAnalysis
+        from models.agent import ApprovalRequest
+        from models.base import generate_uuid
         import json
 
         inc = await self.get(incident_id)
-        if inc.status not in ("created", "failed"):
-            raise HTTPException(400, f"Incident is in '{inc.status}' state; only 'created' or 'failed' incidents can be investigated")
+        if inc.status not in ("created", "failed", "completed"):
+            raise HTTPException(400, f"Incident is in '{inc.status}' state; only 'created', 'failed', or 'completed' incidents can be investigated")
 
         inc.status = "analyzing"
         await self.db.flush()
+
+        audit = AuditService(self.db)
+        await audit.log(
+            "incident", "incident.analysis_started", "success",
+            resource_type="incident", resource_id=inc.id,
+        )
 
         try:
             # Gather sensor evidence
@@ -418,7 +427,7 @@ class IncidentService:
                 )
                 kb = kb_result.scalar_one_or_none()
                 if kb:
-                    settings = load_settings()
+                    settings = get_settings()
                     llm = OllamaClient(settings.ollama_url)
                     embed_svc = EmbeddingService(llm)
                     qdrant_svc = QdrantService()
@@ -426,7 +435,7 @@ class IncidentService:
                     rag_result = await rag_svc.query(
                         kb_id=inc.kb_id,
                         embedding_model=kb.embedding_model,
-                        chat_model=settings.default_chat_model if hasattr(settings, 'default_chat_model') else "llama3",
+                        chat_model=settings.default_chat_model,
                         query=inc.description,
                         top_k=settings.default_top_k,
                         score_threshold=settings.default_score_threshold,
@@ -444,64 +453,132 @@ class IncidentService:
                         for s in rag_result.sources
                     ]
 
+            # Gather vision evidence (non-fatal if vision table missing)
+            vision_evidence: list[dict] = []
+            try:
+                from models.vision import InspectionImage
+                vision_imgs = (await self.db.execute(
+                    select(InspectionImage).where(
+                        InspectionImage.incident_id == incident_id,
+                        InspectionImage.status == "completed",
+                    ).execution_options(populate_existing=True)
+                )).scalars().all()
+                for vi in vision_imgs:
+                    result_data = json.loads(vi.result_json) if vi.result_json else None
+                    vision_evidence.append({
+                        "image_id": vi.id,
+                        "finding": result_data.get("finding", "") if result_data else "",
+                        "defects": result_data.get("defects", []) if result_data else [],
+                        "recommendation": result_data.get("recommendation", "") if result_data else None,
+                        "model": vi.ai_model,
+                    })
+            except Exception:
+                pass
+
             # Build evidence and risk assessment
             evidence = build_evidence(doc_sources, sensor_payload, inc.sensor_analysis_id)
+            evidence["vision"] = vision_evidence
             risk = assess_risk(sensor_payload)
 
             # Store evidence and risk
             inc.evidence_json = json.dumps(evidence)
             inc.risk_json = json.dumps(risk)
-
-            # Generate AI investigation
-            settings = load_settings()
-            llm = OllamaClient(settings.ollama_url)
-            system_prompt, user_prompt = build_investigation_prompt(
-                inc.description, inc.machine, inc.asset_tag, evidence, risk
-            )
-
-            # Call LLM
-            response = await llm.chat(
-                model=settings.default_chat_model if hasattr(settings, 'default_chat_model') else "llama3",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-            ai_text = response.get("content", "")
-            inc.ai_model = settings.default_chat_model if hasattr(settings, 'default_chat_model') else "llama3"
-            inc.ai_analysis = ai_text
-            inc.recommendation_action = extract_action(ai_text)
             inc.recommendation_risk_level = risk.get("level")
             inc.requires_approval = risk.get("level") in ("high", "critical")
+
+            # Generate AI investigation (LLM failure is non-fatal)
+            ai_text = None
+            ai_error = None
+            ai_model = None
+            try:
+                settings = get_settings()
+                llm = OllamaClient(settings.ollama_url)
+                system_prompt, user_prompt = build_investigation_prompt(
+                    inc.description, inc.machine, inc.asset_tag, evidence, risk
+                )
+                response = await llm.chat(
+                    model=settings.default_chat_model,
+                    messages=[ChatMessage(role="user", content=user_prompt)],
+                    system_prompt=system_prompt,
+                )
+                ai_text = response.content
+                ai_model = settings.default_chat_model
+            except Exception as exc:
+                msg = str(exc)
+                if "unavailable" not in msg.lower():
+                    msg = f"LLM service unavailable: {msg}"
+                ai_error = msg[:500]
+
+            inc.ai_model = ai_model
+            inc.ai_analysis = ai_text
+            inc.ai_error = ai_error
+            inc.recommendation_action = extract_action(ai_text)
             inc.status = "completed"
 
-            await self.db.flush()
+            # Create approval request for high/critical risk
+            if inc.requires_approval:
+                expires_at = datetime.now(timezone.utc) + timedelta(
+                    minutes=get_settings().approval_timeout_minutes
+                )
+                approval_req = ApprovalRequest(
+                    id=generate_uuid(),
+                    agent_run_id=None,
+                    requester_id=inc.owner_id,
+                    operation=f"Incident investigation: {inc.title}",
+                    operation_detail_json=json.dumps({
+                        "incident_id": inc.id,
+                        "deterministic_risk": risk.get("level"),
+                    }),
+                    risk_level=risk.get("level", "low"),
+                    status="pending",
+                    expires_at=expires_at,
+                )
+                self.db.add(approval_req)
+                inc.approval_request_id = approval_req.id
+                await self.db.flush()
 
-            audit = AuditService(self.db)
+                audit_log = AuditService(self.db)
+                await audit_log.log(
+                    "approval", "approval.request_created", "pending",
+                    user_id=inc.owner_id,
+                    resource_type="approval_request",
+                    resource_id=approval_req.id,
+                    metadata={
+                        "incident_id": inc.id,
+                        "deterministic_risk": risk.get("level"),
+                    },
+                )
+            else:
+                await self.db.flush()
+
             await audit.log(
-                "incident", "incident.investigated", "success",
+                "incident", "incident.analysis_completed", "success",
                 resource_type="incident", resource_id=inc.id,
                 metadata={"risk_level": risk.get("level")},
             )
 
             return {
-                "status": "completed",
+                "status": inc.status,
                 "evidence": evidence,
                 "risk": risk,
-                "analysis": ai_text,
-                "action": inc.recommendation_action,
+                "ai_analysis": ai_text,
+                "ai_error": ai_error,
+                "recommendation_action": inc.recommendation_action,
+                "recommendation_risk_level": inc.recommendation_risk_level,
                 "requires_approval": inc.requires_approval,
+                "approval_request_id": inc.approval_request_id,
             }
 
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.exception("Investigation failed for incident %s: %s", incident_id, exc)
             inc.status = "failed"
             inc.error_message = str(exc)[:1000]
             await self.db.flush()
 
-            audit = AuditService(self.db)
             await audit.log(
-                "incident", "incident.investigation.failed", "failure",
+                "incident", "incident.analysis.failed", "failure",
                 resource_type="incident", resource_id=incident_id,
                 metadata={"error": str(exc)[:500]},
             )

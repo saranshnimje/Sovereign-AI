@@ -4,6 +4,7 @@ Data/organizations management router.
 import json
 import logging
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel
@@ -246,19 +247,32 @@ async def upload_sensor_data(
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(400, "Only CSV files are supported")
     
-    content = await file.read()
-    if len(content) > 50 * 1024 * 1024:  # 50 MB limit
-        raise HTTPException(400, "File too large (max 50 MB)")
-    
-    # Store the file and create analysis record
+    # Streaming size guard — read in chunks to avoid OOM on huge uploads
     from config import get_settings
     import os
+    import re
     settings = get_settings()
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    chunks = []
+    size = 0
+    while chunk := await file.read(64 * 1024):
+        size += len(chunk)
+        if size > max_bytes:
+            raise HTTPException(413, f"File exceeds {settings.max_upload_size_mb} MB limit")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    
+    if len(content) == 0:
+        raise HTTPException(422, "File is empty")
+    
+    # Store the file and create analysis record
     upload_dir = os.path.join(settings.data_dir, "sensor_uploads")
     os.makedirs(upload_dir, exist_ok=True)
     
     analysis_id = str(uuid.uuid4())
-    safe_name = file.filename.replace("/", "_").replace("\\", "_")
+    safe_name = Path(file.filename).name
+    safe_name = re.sub(r"[^\w.\-]", "_", safe_name)
+    safe_name = safe_name.strip("._") or "upload.csv"
     storage_path = os.path.join(upload_dir, f"{analysis_id}_{safe_name}")
     
     with open(storage_path, "wb") as f:

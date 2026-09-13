@@ -186,7 +186,7 @@ export default function KnowledgeBasesPage() {
                   <div className="flex items-center gap-3">
                     <span className="text-sm">{doc.mime_type === 'application/pdf' ? '📄' : doc.mime_type === 'text/csv' ? '📊' : '📝'}</span>
                     <div>
-                      <p className="text-sm text-neutral-200">{doc.filename}</p>
+                      <p className="text-sm text-neutral-200">{doc.original_name}</p>
                       <p className="text-[10px] text-neutral-500">{doc.page_count || 0} pages, {doc.chunk_count || 0} chunks</p>
                     </div>
                   </div>

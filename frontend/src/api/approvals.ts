@@ -17,7 +17,7 @@ export const approvalsApi = {
     api.get<{ items: ApprovalRequest[]; total: number }>('/approvals/', { params }).then(r => r.data),
   approve: (id: string) =>
     api.post<ApprovalRequest>(`/approvals/${id}/approve`).then(r => r.data),
-  reject: (id: string, reason?: string) =>
-    api.post<ApprovalRequest>(`/approvals/${id}/reject`, { reason }).then(r => r.data),
+  reject: (id: string, note?: string) =>
+    api.post<ApprovalRequest>(`/approvals/${id}/reject`, { note }).then(r => r.data),
   count: () => api.get<{ count: number }>('/approvals/count').then(r => r.data).catch(() => ({ count: 0 })),
 }

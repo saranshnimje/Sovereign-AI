@@ -7,25 +7,25 @@ services:
     autoDeploy: true
     envVars:
       - key: SECRET_KEY
-        value: change-this-to-a-real-secret-key-32-chars-minimum
+        generateValue: true
       - key: ENVIRONMENT
         value: production
       - key: QDRANT_URL
-        value: https://placeholder.qdrant.io
+        sync: false
       - key: QDRANT_API_KEY
-        value: placeholder
+        sync: false
       - key: FRONTEND_ORIGIN
         value: https://sovereign-ai-igkz.vercel.app
       - key: FRONTEND_ORIGINS
         value: https://sovereign-ai-igkz.vercel.app
       - key: OLLAMA_URL
-        value: ""
+        sync: false
       - key: DATA_DIR
         value: /app/data
       - key: DEFAULT_CHAT_MODEL
-        value: gpt-4o-mini
+        value: llama3.2:3b
       - key: DEFAULT_EMBEDDING_MODEL
-        value: text-embedding-3-small
+        value: nomic-embed-text
       - key: DEFAULT_VISION_MODEL
         value: ""
       - key: LOG_LEVEL
@@ -37,4 +37,4 @@ services:
       - key: AGENT_MAX_EXECUTION_TIME_S
         value: "600"
       - key: TERMINAL_ENABLED
-        value: "true"
+        value: "false"

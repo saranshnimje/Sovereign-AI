@@ -62,3 +62,17 @@ class UserUpdate(BaseModel):
         if v is not None and v not in ("viewer", "analyst", "admin"):
             raise ValueError("Role must be viewer, analyst, or admin")
         return v
+
+
+class DemoUserResponse(BaseModel):
+    """A user entry shown on the login page's Demo Credentials section.
+
+    Only verified, working demo passwords are included. Users whose
+    password is not a configured demo credential will have
+    ``has_demo_password=False`` and ``demo_password=None``.
+    """
+
+    email: str
+    role: str
+    has_demo_password: bool = False
+    demo_password: str | None = None

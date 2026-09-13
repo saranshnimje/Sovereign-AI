@@ -54,6 +54,7 @@ class KBResponse(BaseModel):
     description: str | None
     embedding_model: str
     qdrant_collection: str
+    owner_id: str
     doc_count: int
     chunk_count: int
     created_at: datetime

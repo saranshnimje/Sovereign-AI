@@ -129,3 +129,101 @@ async def test_count_users(db):
     )
     await db.flush()
     assert await service.count_users() == 1
+
+
+# ------------------------------------------------------------------
+# get_demo_users
+# ------------------------------------------------------------------
+
+async def _add_user(db, email: str, username: str, role: str, is_active: bool = True):
+    from models.user import User
+    user = User(
+        email=email,
+        username=username,
+        password_hash="$2b$12$fakehash",
+        role=role,
+        is_active=is_active,
+    )
+    db.add(user)
+    await db.flush()
+    return user
+
+
+@pytest.mark.asyncio
+async def test_get_demo_users_empty(db):
+    """No users → empty list."""
+    service = AuthService(db)
+    result = await service.get_demo_users()
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_demo_users_returns_only_admin(db):
+    """Only admin-role users are returned; viewers/analysts are excluded."""
+    service = AuthService(db)
+    await _add_user(db, "admin@test.com", "admin1", "admin")
+    await _add_user(db, "viewer@test.com", "viewer1", "viewer")
+    await _add_user(db, "analyst@test.com", "analyst1", "analyst")
+    result = await service.get_demo_users()
+
+    assert len(result) == 1
+    assert result[0].email == "admin@test.com"
+    assert result[0].role == "admin"
+
+
+@pytest.mark.asyncio
+async def test_get_demo_users_inactive_admin_excluded(db):
+    """Inactive admin users are not returned."""
+    service = AuthService(db)
+    await _add_user(db, "admin@test.com", "admin1", "admin", is_active=False)
+    result = await service.get_demo_users()
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_demo_users_admin_not_in_demo_credentials(db):
+    """Admin NOT in DEMO_CREDENTIALS has has_demo_password=False."""
+    service = AuthService(db)
+    await _add_user(db, "other-admin@test.com", "otheradmin", "admin")
+    result = await service.get_demo_users()
+    assert len(result) == 1
+    assert result[0].has_demo_password is False
+    assert result[0].demo_password is None
+
+
+@pytest.mark.asyncio
+async def test_get_demo_users_admin_demo_password(db):
+    """admin@admin.com is the configured demo credential → password shown."""
+    service = AuthService(db)
+    await _add_user(db, "admin@admin.com", "admin", "admin")
+    result = await service.get_demo_users()
+
+    assert len(result) == 1
+    assert result[0].email == "admin@admin.com"
+    assert result[0].role == "admin"
+    assert result[0].has_demo_password is True
+    assert result[0].demo_password == "admin12345678"
+
+
+@pytest.mark.asyncio
+async def test_get_demo_users_e2e_analyst_not_returned(db):
+    """e2e_analyst@test.com must never be returned."""
+    service = AuthService(db)
+    await _add_user(db, "admin@admin.com", "admin", "admin")
+    # The old analyst demo user still exists in an unclean DB
+    await _add_user(db, "e2e_analyst@test.com", "e2e_analyst", "analyst")
+    result = await service.get_demo_users()
+
+    assert len(result) == 1
+    assert result[0].email == "admin@admin.com"
+    assert all(u.email != "e2e_analyst@test.com" for u in result)
+
+
+@pytest.mark.asyncio
+async def test_get_demo_users_schema_fields(db):
+    """Each entry contains exactly email, role, has_demo_password, demo_password."""
+    service = AuthService(db)
+    await _add_user(db, "admin@test.com", "admin1", "admin")
+    result = await service.get_demo_users()
+    entry = result[0]
+    assert set(entry.model_dump().keys()) == {"email", "role", "has_demo_password", "demo_password"}

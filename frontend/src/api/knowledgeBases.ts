@@ -16,9 +16,9 @@ export interface KnowledgeBase {
 export interface Document {
   id: string
   kb_id: string
-  filename: string
+  original_name: string
   mime_type: string
-  status: 'pending' | 'processing' | 'completed' | 'failed'
+  status: 'pending' | 'processing' | 'indexed' | 'failed'
   page_count: number | null
   chunk_count: number | null
   error_message: string | null
