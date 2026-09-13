@@ -36,6 +36,12 @@ async def lifespan(app: FastAPI):
     for sub in ["sqlite", "uploads", "sandbox_workspace"]:
         (data_dir / sub).mkdir(parents=True, exist_ok=True)
 
+    # Run startup migration fixup BEFORE init_db() to add any columns
+    # that were added by Alembic migrations but never applied to the DB.
+    from database import engine as _engine, _is_postgres
+    from migration_runner import run_startup_migrations
+    await run_startup_migrations(_engine, _is_postgres)
+
     await init_db()
     logger.info("Database initialised")
 
