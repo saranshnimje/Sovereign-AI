@@ -52,8 +52,16 @@ class ModelService:
         self.settings = get_settings()
 
     async def list_models(self) -> list[ModelInfo]:
-        """Return all Ollama models with role annotations."""
-        raw = await self.llm.list_models()
+        """Return all Ollama models with role annotations.
+
+        Gracefully degrades when the Ollama server is unreachable —
+        returns an empty list instead of raising a 500.
+        """
+        try:
+            raw = await self.llm.list_models()
+        except Exception as exc:
+            logger.warning("list_models: provider unreachable: %s", exc)
+            return []
         roles = _load_roles()
         active_models = {v: k for k, v in roles.items() if v}
 
