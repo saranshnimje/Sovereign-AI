@@ -27,14 +27,49 @@ def upgrade() -> None:
     op.create_index("idx_agent_events_run_seq", "agent_events", ["run_id", "sequence"])
 
     # Add new fields to agent_runs
-    with op.batch_alter_table("agent_runs") as batch:
-        batch.add_column(sa.Column("goal_json", sa.Text(), nullable=True))
-        batch.add_column(sa.Column("current_step_id", sa.Integer(), nullable=True))
-        batch.add_column(sa.Column("cancel_requested", sa.Boolean(), nullable=False, server_default="0"))
-        batch.add_column(sa.Column("parent_run_id", sa.String(36), nullable=True))
-        batch.add_column(sa.Column("context_summary", sa.Text(), nullable=True))
-        batch.add_column(sa.Column("final_verification_json", sa.Text(), nullable=True))
-        batch.add_column(sa.Column("failure_reason", sa.Text(), nullable=True))
+    conn = op.get_bind()
+    dialect = conn.dialect.name
+
+    def _col_exists(table: str, column: str) -> bool:
+        if dialect == "postgresql":
+            result = conn.execute(
+                sa.text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = :table AND column_name = :col"
+                ),
+                {"table": table, "col": column},
+            )
+            return result.fetchone() is not None
+        elif dialect == "sqlite":
+            cols = [r[1] for r in conn.execute(sa.text(f"PRAGMA table_info({table})"))]
+            return column in cols
+        return False
+
+    cols_to_add = [
+        ("goal_json", sa.Text),
+        ("current_step_id", sa.Integer),
+        ("cancel_requested", sa.Boolean),
+        ("parent_run_id", sa.String(36)),
+        ("context_summary", sa.Text),
+        ("final_verification_json", sa.Text),
+        ("failure_reason", sa.Text),
+    ]
+
+    if dialect == "postgresql":
+        for col_name, col_type in cols_to_add:
+            if not _col_exists("agent_runs", col_name):
+                nullable = col_name != "cancel_requested"
+                default = sa.text("false") if col_name == "cancel_requested" else None
+                op.add_column("agent_runs", sa.Column(col_name, col_type, nullable=nullable, server_default=default))
+    else:
+        with op.batch_alter_table("agent_runs") as batch:
+            batch.add_column(sa.Column("goal_json", sa.Text(), nullable=True))
+            batch.add_column(sa.Column("current_step_id", sa.Integer(), nullable=True))
+            batch.add_column(sa.Column("cancel_requested", sa.Boolean(), nullable=False, server_default="0"))
+            batch.add_column(sa.Column("parent_run_id", sa.String(36), nullable=True))
+            batch.add_column(sa.Column("context_summary", sa.Text(), nullable=True))
+            batch.add_column(sa.Column("final_verification_json", sa.Text(), nullable=True))
+            batch.add_column(sa.Column("failure_reason", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
