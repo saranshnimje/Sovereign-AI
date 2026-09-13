@@ -13,8 +13,21 @@ depends_on = None
 
 def _col_exists(table: str, column: str) -> bool:
     conn = op.get_bind()
-    cols = [r[1] for r in conn.execute(sa.text(f"PRAGMA table_info({table})"))]
-    return column in cols
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        result = conn.execute(
+            sa.text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = :table AND column_name = :col"
+            ),
+            {"table": table, "col": column},
+        )
+        return result.fetchone() is not None
+    elif dialect == "sqlite":
+        cols = [r[1] for r in conn.execute(sa.text(f"PRAGMA table_info({table})"))]
+        return column in cols
+    else:
+        return False
 
 
 def upgrade() -> None:

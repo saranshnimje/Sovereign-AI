@@ -3,7 +3,7 @@ services:
     name: sovereign-ai-backend
     runtime: python
     buildCommand: cd backend && pip install -r requirements.txt
-    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: cd backend && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
     envVars:
       - key: SECRET_KEY
