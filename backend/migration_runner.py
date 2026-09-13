@@ -47,8 +47,8 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
                     await conn.execute(text(ddl))
                     logger.info(f"Added column agent_runs.{col_name}")
 
-            # --- 2. Create agent_events table if missing ---
-            if not await _table_exists(conn, "agent_events", is_postgres):
+            # --- 2. Create agent_events table if missing (PostgreSQL only) ---
+            if is_postgres and not await _table_exists(conn, "agent_events", is_postgres):
                 await conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS agent_events (
                         id VARCHAR(36) NOT NULL PRIMARY KEY,
@@ -56,7 +56,7 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
                         "sequence" INTEGER NOT NULL,
                         event_type VARCHAR(50) NOT NULL,
                         payload_json TEXT,
-                        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
                 await conn.execute(text(
