@@ -35,8 +35,13 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Point Alembic at the application's real database URL.
+# Must normalise to the async driver (+asyncpg) so async_engine_from_config
+# does not fall back to the sync psycopg2 driver.
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+_db_url = settings.database_url
+if _db_url.startswith("postgresql://"):
+    _db_url = _db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+config.set_main_option("sqlalchemy.url", _db_url)
 
 target_metadata = Base.metadata
 
