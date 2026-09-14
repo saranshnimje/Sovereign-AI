@@ -15,6 +15,7 @@ from models.data import Organization, DataSource
 from models.sensor import SensorAnalysis
 from models.incident import Incident
 from models.vision import InspectionImage
+from models.artifact import Artifact
 
 __all__ = [
     "User",
@@ -38,5 +39,6 @@ __all__ = [
     "SensorAnalysis",
     "Incident",
     "InspectionImage",
+    "Artifact",
 ]
 

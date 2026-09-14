@@ -44,6 +44,12 @@ export interface ActiveStream {
   agentState: string | null
   verificationStatus: 'none' | 'started' | 'passed' | 'failed'
   verificationType: string | null
+  // ASK_USER: pending question state
+  askUser: {
+    question: string
+    options: string[]
+    runId: string
+  } | null
 }
 
 interface ChatState {
@@ -103,6 +109,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       agentState: null,
       verificationStatus: 'none',
       verificationType: null,
+      askUser: null,
     }
     set((s) => ({
       activeStreams: { ...s.activeStreams, [convId]: stream },

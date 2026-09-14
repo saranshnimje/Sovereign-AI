@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from database import get_db
-from dependencies import get_current_user, resolve_llm_for_role_async
+from dependencies import get_current_user, resolve_llm_for_role_async, resolve_llm_with_failover
 from models.user import User
 from models.conversation import Conversation, Message as Msg
 from schemas.chat import ConversationCreate, ConversationDetail, ConversationResponse, MessageCreate
@@ -140,65 +140,72 @@ async def get_agent_events(
     if conv is None:
         raise HTTPException(404, "Conversation not found")
 
-    # Find agent runs for this conversation (via assistant messages with run_id metadata)
-    # We join through messages to find run_ids associated with this conversation
+    # Find agent runs for this conversation using the direct conversation_id FK
     from sqlalchemy.orm import selectinload
-    msg_res = await db.execute(
-        select(Msg).where(
-            Msg.conversation_id == conv_id,
-            Msg.role == "assistant",
-        )
-    )
-    messages = list(msg_res.scalars().all())
 
-    run_ids = set()
-    for msg in messages:
-        try:
-            meta = json.loads(msg.metadata_json) if msg.metadata_json else {}
-            if meta.get("run_id"):
-                run_ids.add(meta["run_id"])
-        except Exception:
-            pass
-
-    # Also find run_ids from persisted agent_started events whose payload
-    # carries this conversation_id (AgentRun has no conversation_id column,
-    # so payload inspection is the only way to scope runs to the conversation).
-    evt_run_res = await db.execute(
-        select(AgentEvent)
-        .join(AgentRun, AgentEvent.run_id == AgentRun.id)
-        .where(
-            AgentEvent.event_type == "agent_started",
+    run_res = await db.execute(
+        select(AgentRun).where(
+            AgentRun.conversation_id == conv_id,
             AgentRun.user_id == current_user.id,
         )
     )
-    for evt in evt_run_res.scalars().all():
-        try:
-            payload = json.loads(evt.payload_json) if evt.payload_json else {}
-            if payload.get("conversation_id") == conv_id:
-                run_ids.add(evt.run_id)
-        except Exception:
-            pass
+    runs_list = list(run_res.scalars().all())
+    run_ids = {r.id for r in runs_list}
+
+    # Fallback: also check assistant message metadata for runs without conversation_id
+    # (backward compatibility with older runs)
+    if not run_ids:
+        msg_res = await db.execute(
+            select(Msg).where(
+                Msg.conversation_id == conv_id,
+                Msg.role == "assistant",
+            )
+        )
+        messages = list(msg_res.scalars().all())
+        for msg in messages:
+            try:
+                meta = json.loads(msg.metadata_json) if msg.metadata_json else {}
+                if meta.get("run_id"):
+                    run_ids.add(meta["run_id"])
+            except Exception:
+                pass
+
+        # Also check agent_started events whose payload carries this conversation_id
+        evt_run_res = await db.execute(
+            select(AgentEvent)
+            .join(AgentRun, AgentEvent.run_id == AgentRun.id)
+            .where(
+                AgentEvent.event_type == "agent_started",
+                AgentRun.user_id == current_user.id,
+            )
+        )
+        for evt in evt_run_res.scalars().all():
+            try:
+                payload = json.loads(evt.payload_json) if evt.payload_json else {}
+                if payload.get("conversation_id") == conv_id:
+                    run_ids.add(evt.run_id)
+            except Exception:
+                pass
 
     if not run_ids:
         return {"events": [], "runs": []}
 
-    # Fetch events for all runs
+    # Fetch ALL events for ALL runs in a single query (avoids N+1)
     events = []
-    for rid in run_ids:
-        evt_res = await db.execute(
-            select(AgentEvent).where(
-                AgentEvent.run_id == rid
-            ).order_by(AgentEvent.sequence)
-        )
-        for evt in evt_res.scalars().all():
-            events.append({
-                "id": evt.id,
-                "run_id": evt.run_id,
-                "sequence": evt.sequence,
-                "event_type": evt.event_type,
-                "payload": json.loads(evt.payload_json) if evt.payload_json else {},
-                "created_at": evt.created_at.isoformat() if evt.created_at else None,
-            })
+    evt_res = await db.execute(
+        select(AgentEvent).where(
+            AgentEvent.run_id.in_(run_ids)
+        ).order_by(AgentEvent.sequence)
+    )
+    for evt in evt_res.scalars().all():
+        events.append({
+            "id": evt.id,
+            "run_id": evt.run_id,
+            "sequence": evt.sequence,
+            "event_type": evt.event_type,
+            "payload": json.loads(evt.payload_json) if evt.payload_json else {},
+            "created_at": evt.created_at.isoformat() if evt.created_at else None,
+        })
 
     # Sort by sequence across all runs
     events.sort(key=lambda e: e["sequence"])
@@ -413,37 +420,38 @@ async def send_agent_message(
     from database import AsyncSessionLocal
     session = (_session_factory or AsyncSessionLocal)()
 
-    try:
-        if data.provider_id:
-            from models.provider import LLMProvider as _P
-            from services.llm_client import build_provider as _build
-            res = await db.execute(select(_P).where(_P.id == data.provider_id))
-            prov = res.scalar_one_or_none()
-            if prov is None:
-                raise HTTPException(404, "Provider not found")
-            if not prov.enabled:
-                raise HTTPException(400, "Provider is disabled")
-            llm = _build(prov.provider_type, prov.base_url, prov.api_key,
-                         custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None)
-            model_label = f"{prov.name} / {data.model_name or prov.model_name}"
-        else:
-            llm = await resolve_llm_for_role_async(session, "chat")
-            model_label = f"Auto / {data.model_name or 'default'}"
+    if data.provider_id:
+        from models.provider import LLMProvider as _P
+        from services.llm_client import build_provider as _build
+        res = await db.execute(select(_P).where(_P.id == data.provider_id))
+        prov = res.scalar_one_or_none()
+        if prov is None:
+            raise HTTPException(404, "Provider not found")
+        if not prov.enabled:
+            raise HTTPException(400, "Provider is disabled")
+        llm = _build(prov.provider_type, prov.base_url, prov.api_key,
+                     custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None)
+        model_label = f"{prov.name} / {data.model_name or prov.model_name}"
+    else:
+        llm = await resolve_llm_for_role_async(session, "chat")
+        model_label = f"Auto / {data.model_name or 'default'}"
 
-        from sqlalchemy.orm import selectinload
-        res = await db.execute(select(Conversation).options(
-            selectinload(Conversation.messages)
-        ).where(
-            Conversation.id == conv_id, Conversation.user_id == current_user.id))
-        conv = res.scalar_one_or_none()
-        if conv is None:
-            raise HTTPException(404, "Conversation not found")
-    except HTTPException:
-        await session.close()
-        raise
-    except Exception:
-        await session.close()
-        raise
+    from sqlalchemy.orm import selectinload
+    res = await db.execute(select(Conversation).options(
+        selectinload(Conversation.messages)
+    ).where(
+        Conversation.id == conv_id, Conversation.user_id == current_user.id))
+    conv = res.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(404, "Conversation not found")
+
+    # Build conversation history for agent memory
+    # Include recent messages (up to 20) for context-aware agent responses
+    conversation_history: list[dict[str, str]] = []
+    recent_msgs = conv.messages[-20:] if len(conv.messages) > 20 else conv.messages
+    for msg in recent_msgs:
+        if msg.role in ("user", "assistant"):
+            conversation_history.append({"role": msg.role, "content": msg.content})
 
     # Build tool list
     reg = get_registry()
@@ -500,6 +508,8 @@ async def send_agent_message(
         goal=data.content,
         status="running",
         model_name=data.model_name,
+        conversation_id=conv_id,
+        message_id=user_msg.id,
     )
     session.add(agent_run)
     await session.flush()
@@ -532,6 +542,7 @@ async def send_agent_message(
                 agent_mode=agent_mode,
                 run_id=run_id,
                 user_kb_ids=user_kb_ids,
+                conversation_history=conversation_history,
             ):
                 # On final_response: persist assistant message BEFORE yielding
                 # This ensures DONE => final response already exists in DB

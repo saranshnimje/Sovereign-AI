@@ -16,6 +16,7 @@ from models.agent import AgentRun, ToolCall
 from models.user import User
 from schemas.agent import AgentRunCreate, AgentRunDetail, AgentRunResponse, ToolCallResponse
 from services.tool_catalog import ToolCatalogService
+from utils.rate_limit import ai_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -200,4 +201,164 @@ async def get_capabilities(
         "models": [],
         "tools": tools,
         "plugins": plugins,
+    }
+
+
+# ------------------------------------------------------------------
+# ASK_USER: Answer a pending question to resume an agent run
+# ------------------------------------------------------------------
+
+class UserAnswerRequest(BaseModel):
+    answer: str = Field(..., min_length=1, max_length=5000)
+
+
+@router.post("/runs/{run_id}/answer")
+async def answer_user_question(
+    run_id: str,
+    data: UserAnswerRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(ai_rate_limit),
+):
+    """Answer a pending ASK_USER question to resume an agent run.
+
+    The agent run must be in 'awaiting_user' status.
+    The answer is persisted and the run is resumed.
+    """
+    result = await db.execute(select(AgentRun).where(AgentRun.id == run_id))
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(404, "Agent run not found")
+    if run.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(403, "Access denied")
+    if run.status != "awaiting_user":
+        raise HTTPException(400, f"Run is not awaiting user input (status: {run.status})")
+
+    # Persist the answer
+    run.user_answer = data.answer
+    run.status = "running"
+    run.pending_question = None
+    run.pending_options_json = None
+    await db.flush()
+
+    # Resume the agent run in background
+    import asyncio
+    from services.agent.runtime import AgentRuntime
+    from dependencies import resolve_llm_for_role_async
+
+    async def _resume_run():
+        """Resume the agent run with the user's answer injected as context."""
+        try:
+            # Build fresh DB session for background task
+            from database import AsyncSessionLocal
+            async with AsyncSessionLocal() as resume_db:
+                # Resolve LLM
+                llm = await resolve_llm_for_role_async(resume_db, "chat")
+
+                # Reload the run
+                res = await resume_db.execute(select(AgentRun).where(AgentRun.id == run_id))
+                fresh_run = res.scalar_one_or_none()
+                if not fresh_run or fresh_run.status != "running":
+                    return
+
+                # Get conversation history
+                from models.conversation import Conversation
+                from sqlalchemy.orm import selectinload
+                conv_res = await resume_db.execute(
+                    select(Conversation)
+                    .options(selectinload(Conversation.messages))
+                    .where(Conversation.id == run.conversation_id)
+                )
+                conv = conv_res.scalar_one_or_none()
+                conversation_history = []
+                if conv:
+                    for msg in conv.messages[-20:]:
+                        if msg.role in ("user", "assistant"):
+                            conversation_history.append({"role": msg.role, "content": msg.content})
+
+                # Add the user's answer to conversation history
+                conversation_history.append({"role": "user", "content": data.answer})
+
+                # Build the resumed goal with the answer
+                resumed_goal = (
+                    f"User answered your question: '{run.goal}'\n"
+                    f"User's answer: {data.answer}\n\n"
+                    f"Continue with the task using this information."
+                )
+
+                # Get tool names from plan
+                plan_meta = json.loads(run.plan_json or "{}")
+                allowed_tools = plan_meta.get("allowed_tools")
+
+                from tools.registry import get_registry
+                reg = get_registry()
+                available_tools = reg.list_enabled(user_role=current_user.role)
+                tool_names = [t.name for t in available_tools]
+                if allowed_tools:
+                    tool_names = [t for t in tool_names if t in allowed_tools]
+
+                tool_descriptions = reg.get_tool_list_for_prompt(
+                    allowed_names=tool_names, user_role=current_user.role
+                )
+
+                # Get user KB IDs
+                user_kb_ids = []
+                if "search_kb" in tool_names:
+                    from models.knowledge_base import KnowledgeBase
+                    kb_res = await resume_db.execute(
+                        select(KnowledgeBase.id).where(KnowledgeBase.owner_id == current_user.id)
+                    )
+                    user_kb_ids = [row[0] for row in kb_res.all()]
+
+                runtime = AgentRuntime()
+                from services.agent_state import AgentStateMachine
+                agent = AgentStateMachine()
+
+                events = []
+                async for event_str in runtime.run(
+                    goal=resumed_goal,
+                    user_id=current_user.id,
+                    user_role=current_user.role,
+                    model=fresh_run.model_name or "default",
+                    llm=llm,
+                    db=resume_db,
+                    tool_names=tool_names,
+                    tool_descriptions=tool_descriptions,
+                    conversation_id=run.conversation_id,
+                    agent_state=agent,
+                    agent_mode="agent",
+                    run_id=run_id,
+                    user_kb_ids=user_kb_ids,
+                    conversation_history=conversation_history,
+                ):
+                    events.append(event_str)
+
+                # Update run status
+                fresh_run.status = agent.state.value if agent.state.value in (
+                    "completed", "failed", "cancelled"
+                ) else "completed"
+                fresh_run.result = "".join(events)[-10000:] if events else None
+                await resume_db.commit()
+
+        except Exception as exc:
+            logger.exception("Failed to resume agent run %s: %s", run_id, exc)
+            try:
+                from database import AsyncSessionLocal
+                async with AsyncSessionLocal() as err_db:
+                    res = await err_db.execute(select(AgentRun).where(AgentRun.id == run_id))
+                    err_run = res.scalar_one_or_none()
+                    if err_run:
+                        err_run.status = "failed"
+                        err_run.error_message = str(exc)[:1000]
+                        await err_db.commit()
+            except Exception:
+                pass
+
+    # Start background task
+    asyncio.create_task(_resume_run())
+
+    return {
+        "detail": "Answer submitted, agent resuming",
+        "run_id": run_id,
+        "answer": data.answer,
     }

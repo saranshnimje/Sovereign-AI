@@ -277,12 +277,38 @@ class AgentRuntime:
                 return True
         return False
 
+    def _build_conversation_context(self, max_messages: int = 20) -> str:
+        """Build a conversation context string from recent history.
+
+        Returns a formatted block showing recent turns so the agent can
+        reference prior conversation (names, preferences, previous answers).
+        Bounded to max_messages to avoid excessive token usage.
+        """
+        history = self._conversation_history
+        if not history:
+            return ""
+
+        recent = history[-max_messages:] if len(history) > max_messages else history
+        lines = []
+        for msg in recent:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            # Truncate very long messages
+            if len(content) > 500:
+                content = content[:500] + "...[truncated]"
+            if role == "user":
+                lines.append(f"User: {content}")
+            elif role == "assistant":
+                lines.append(f"Assistant: {content}")
+        return "\n".join(lines)
+
     async def _understand(
         self, *, llm: Any, model: str, goal: str, tool_descriptions: str,
     ) -> UnderstandingResult:
         """Classify user intent and determine execution path.
 
         Uses deterministic rules for obvious cases, LLM for ambiguous ones.
+        Includes conversation history for context-aware classification.
         """
         stripped = goal.strip()
 
@@ -300,7 +326,18 @@ class AgentRuntime:
 
         # --- LLM-based understanding for everything else ---
         system = UNDERSTAND_SYSTEM
-        user = UNDERSTAND_USER.format(goal=stripped, tools=tool_descriptions or "No tools available")
+
+        # Build user message with conversation context
+        conv_ctx = self._build_conversation_context()
+        if conv_ctx:
+            user_content = (
+                f"Recent conversation:\n{conv_ctx}\n\n"
+                f"Current user message: {stripped}\n\n"
+                f"Available tools:\n{tool_descriptions or 'No tools available'}\n\n"
+                "Classify this request and determine the execution path."
+            )
+        else:
+            user_content = UNDERSTAND_USER.format(goal=stripped, tools=tool_descriptions or "No tools available")
 
         try:
             resp = await asyncio.wait_for(
@@ -308,7 +345,7 @@ class AgentRuntime:
                     model=model,
                     messages=[
                         ChatMessage(role="system", content=system),
-                        ChatMessage(role="user", content=user),
+                        ChatMessage(role="user", content=user_content),
                     ],
                     stream=False,
                     temperature=0.0,
@@ -418,7 +455,10 @@ class AgentRuntime:
     # ------------------------------------------------------------------
 
     def _generate_conversation_response(self, goal: str) -> str:
-        """Generate a direct response for conversational requests."""
+        """Generate a direct response for conversational requests.
+
+        Uses conversation history for context-aware responses.
+        """
         stripped = goal.strip().lower()
         # Deterministic responses for common greetings
         if any(w in stripped for w in ["hi", "hello", "hey", "howdy", "greetings"]):
@@ -437,18 +477,33 @@ class AgentRuntime:
     async def _generate_knowledge_response(
         self, *, llm: Any, model: str, goal: str,
     ) -> str:
-        """Generate a direct knowledge response without tools."""
-        system = "You are a helpful AI assistant. Answer the user's question directly and concisely. Do NOT use any tools. Keep your response under 200 words."
-        user = f"Question: {goal}"
+        """Generate a direct knowledge response without tools.
+
+        Includes conversation history for context-aware answers (e.g., remembering
+        user's name from earlier in the conversation).
+        """
+        system = "You are a helpful AI assistant inside Sovereign AI Workbench. Answer the user's question directly and concisely. Do NOT use any tools. Keep your response under 200 words. If the user mentioned something earlier in the conversation, use that context to provide a better answer."
+
+        # Build message list with conversation history
+        messages: list[ChatMessage] = [
+            ChatMessage(role="system", content=system),
+        ]
+
+        # Add conversation history for context
+        conv_ctx = self._build_conversation_context(max_messages=10)
+        if conv_ctx:
+            messages.append(ChatMessage(
+                role="user",
+                content=f"Recent conversation for context:\n{conv_ctx}\n\nCurrent question: {goal}",
+            ))
+        else:
+            messages.append(ChatMessage(role="user", content=f"Question: {goal}"))
 
         try:
             resp = await asyncio.wait_for(
                 llm.chat(
                     model=model,
-                    messages=[
-                        ChatMessage(role="system", content=system),
-                        ChatMessage(role="user", content=user),
-                    ],
+                    messages=messages,
                     stream=False,
                     temperature=0.3,
                     max_tokens=1024,
@@ -1014,10 +1069,30 @@ class AgentRuntime:
 
                 case "ASK_USER":
                     final_content = decision.reason
-                    agent.fail("Waiting for user input")
+                    # Persist the question for the frontend to render
+                    question_text = decision.reason
+                    options = []
+                    # Extract options from the decision if present
+                    if decision.next_action and decision.next_action.input:
+                        options = decision.next_action.input.get("options", [])
+
+                    # Set run status to awaiting_user and persist question
+                    run_record = await self._get_run_record(db, run_id)
+                    if run_record:
+                        run_record.status = "awaiting_user"
+                        run_record.pending_question = question_text
+                        run_record.pending_options_json = _json.dumps(options) if options else None
+                        await db.flush()
+
+                    yield _sse("ask_user", {
+                        "question": question_text,
+                        "options": options,
+                        "run_id": run_id,
+                    })
                     yield _sse("agent_state", agent.to_dict())
-                    yield _sse("token", {"delta": decision.reason})
-                    break
+                    agent.fail("Waiting for user input")
+                    _result[0] = final_content
+                    return
 
                 case "ANSWER_DIRECTLY":
                     final_content = decision.answer or decision.reason
@@ -1093,6 +1168,7 @@ class AgentRuntime:
         agent_mode: str = "agent",
         run_id: str | None = None,
         user_kb_ids: list[str] | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
     ) -> AsyncGenerator[str, None]:
         """Execute the full autonomous agent loop.
 
@@ -1100,6 +1176,11 @@ class AgentRuntime:
 
         Flow:
           UNDERSTAND → ROUTE → (CONVERSATION | KNOWLEDGE | TASK) → PLAN → REASON → TOOL → OBSERVE → VERIFY
+
+        conversation_history: list of {"role": "user"|"assistant", "content": "..."}
+          Recent conversation messages for context. The agent uses this to understand
+          prior turns (e.g., user said "My name is Rahul" → assistant said "Nice to meet you"
+          → current goal "What is my name?" → agent knows the answer).
         """
         agent = agent_state or AgentStateMachine()
         start_time = time.monotonic()
@@ -1109,6 +1190,11 @@ class AgentRuntime:
         self._db = db
         self._sequence = 0
         self._user_kb_ids = user_kb_ids
+
+        # --- Conversation context for memory ---
+        # Recent messages provide conversational context so the agent can
+        # reference prior turns (names, preferences, previous answers, etc.)
+        self._conversation_history = conversation_history or []
 
         # --- Build execution context ---
         from tools.registry import get_registry
@@ -1125,6 +1211,10 @@ class AgentRuntime:
         # --- Initialize ---
         agent.start(goal)
         yield _sse("agent_state", agent.to_dict())
+
+        # --- Create isolated workspace for file operations ---
+        workspace_path = self._make_workspace(run_id or "unknown")
+        self._workspace_path = workspace_path
 
         # --- Action fingerprint tracking for loop detection ---
         _action_fingerprints: dict[str, int] = {}
@@ -1398,6 +1488,9 @@ class AgentRuntime:
             } if agent.verification else None,
         })
 
+        # --- Cleanup workspace ---
+        self._cleanup_workspace(getattr(self, "_workspace_path", ""))
+
     # ------------------------------------------------------------------
     # Internal: Planning
     # ------------------------------------------------------------------
@@ -1459,10 +1552,13 @@ class AgentRuntime:
         observations: list[Observation],
         evidence: list[str],
         failed_attempts: list[dict],
-        tool_results_context: list[str],
+        tool_results_context: list[dict[str, str]],
         tool_descriptions: str,
     ) -> AgentDecision:
-        """Ask the LLM to decide the next action."""
+        """Ask the LLM to decide the next action.
+
+        Includes conversation history for context-aware decisions.
+        """
         criteria_text = "\n".join(
             f"- {s.description} (tool: {s.tool_name or 'none'})"
             for s in agent.plan
@@ -1493,15 +1589,23 @@ class AgentRuntime:
             for f in (failed_attempts[-3:] if failed_attempts else [])
         ) or "None."
 
+        # Include conversation history for context-aware reasoning
+        conv_ctx = self._build_conversation_context(max_messages=10)
+        conv_section = ""
+        if conv_ctx:
+            conv_section = f"\nRecent conversation:\n{conv_ctx}\n"
+
         system = REASONER_SYSTEM
-        user = REASONER_USER.format(
-            goal=goal,
-            criteria=criteria_text,
-            current_step=current_step,
-            history=history,
-            observations=obs_text,
-            evidence=evidence_text,
-            failures=failures_text,
+        user = (
+            f"Goal: {goal}\n"
+            f"{conv_section}\n"
+            f"Acceptance criteria:\n{criteria_text}\n\n"
+            f"Current plan step: {current_step}\n\n"
+            f"Previous steps summary:\n{history}\n\n"
+            f"Recent observations:\n{obs_text}\n\n"
+            f"Evidence collected:\n{evidence_text}\n\n"
+            f"Failed attempts:\n{failures_text}\n\n"
+            f"Decide the next action."
         )
 
         try:
@@ -1890,6 +1994,7 @@ class AgentRuntime:
         from types import SimpleNamespace
         context = {
             "user": SimpleNamespace(id=user_id, role=user_role),
+            "workspace_path": getattr(self, "_workspace_path", ""),
         }
 
         # Lazily initialize RAG/KB services for tools that need them
@@ -1942,6 +2047,30 @@ class AgentRuntime:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _make_workspace(self, run_id: str) -> str:
+        """Create an isolated workspace directory for file operations."""
+        import uuid as _uuid
+        from config import get_settings
+        settings = get_settings()
+        workspace = os.path.join(
+            settings.sandbox_workspace,
+            f"run_{run_id}_{_uuid.uuid4().hex[:8]}"
+        )
+        os.makedirs(workspace, exist_ok=True)
+        logger.info("Created workspace: %s", workspace)
+        return workspace
+
+    @staticmethod
+    def _cleanup_workspace(workspace: str) -> None:
+        """Clean up workspace directory after run completes."""
+        import shutil as _shutil
+        try:
+            if workspace and os.path.isdir(workspace):
+                _shutil.rmtree(workspace, ignore_errors=True)
+                logger.info("Cleaned workspace: %s", workspace)
+        except Exception as exc:
+            logger.warning("Could not clean workspace %s: %s", workspace, exc)
+
     @staticmethod
     def _trim_output(output: dict) -> dict:
         trimmed = {}
@@ -1961,3 +2090,14 @@ class AgentRuntime:
         if tool_name == "file_read" and result.get("path"):
             artifacts.append(result["path"])
         return artifacts
+
+    async def _get_run_record(self, db: AsyncSession, run_id: str | None):
+        """Get the AgentRun record from DB for status updates."""
+        if not run_id:
+            return None
+        try:
+            from models.agent import AgentRun
+            result = await db.execute(select(AgentRun).where(AgentRun.id == run_id))
+            return result.scalar_one_or_none()
+        except Exception:
+            return None

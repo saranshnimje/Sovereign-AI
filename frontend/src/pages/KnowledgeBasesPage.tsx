@@ -3,6 +3,7 @@ import { knowledgeBasesApi, KnowledgeBase, Document } from '../api/knowledgeBase
 import { useAuthStore } from '../stores/authStore'
 import { useUIStore } from '../stores/uiStore'
 import Badge from '../components/ui/Badge'
+import DocumentPreviewModal from '../components/documents/DocumentPreviewModal'
 
 export default function KnowledgeBasesPage() {
   const { user } = useAuthStore()
@@ -16,6 +17,7 @@ export default function KnowledgeBasesPage() {
   const [loadingDocs, setLoadingDocs] = useState(false)
   const [uploading, setUploading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const [previewDoc, setPreviewDoc] = useState<Document | null>(null)
 
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
@@ -182,7 +184,11 @@ export default function KnowledgeBasesPage() {
           ) : (
             <div className="space-y-2">
               {documents.map(doc => (
-                <div key={doc.id} className="flex items-center justify-between p-3 bg-surface-overlay rounded-lg border border-surface-border">
+                <div
+                  key={doc.id}
+                  onClick={() => setPreviewDoc(doc)}
+                  className="flex items-center justify-between p-3 bg-surface-overlay rounded-lg border border-surface-border hover:border-cyan-700/50 transition-all cursor-pointer"
+                >
                   <div className="flex items-center gap-3">
                     <span className="text-sm">{doc.mime_type === 'application/pdf' ? '📄' : doc.mime_type === 'text/csv' ? '📊' : '📝'}</span>
                     <div>
@@ -196,6 +202,10 @@ export default function KnowledgeBasesPage() {
             </div>
           )}
         </div>
+      )}
+
+      {previewDoc && (
+        <DocumentPreviewModal document={previewDoc} onClose={() => setPreviewDoc(null)} />
       )}
     </div>
   )

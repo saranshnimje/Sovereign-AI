@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = structlog.get_logger()
 
-# Columns that must exist on agent_runs (added by migrations 6 & 7)
+# Columns that must exist on agent_runs (added by migrations 6, 7, and 8)
 _AGENT_RUNS_COLUMNS = [
     ("goal_json", "TEXT"),
     ("current_step_id", "INTEGER"),
@@ -27,6 +27,12 @@ _AGENT_RUNS_COLUMNS = [
     ("final_verification_json", "TEXT"),
     ("failure_reason", "TEXT"),
     ("todo_json", "TEXT"),
+    # Migration 8: conversation/message links + ASK_USER fields
+    ("conversation_id", "VARCHAR(36)"),
+    ("message_id", "VARCHAR(36)"),
+    ("pending_question", "TEXT"),
+    ("pending_options_json", "TEXT"),
+    ("user_answer", "TEXT"),
 ]
 
 
@@ -74,6 +80,34 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
                     pass  # FK constraint may already exist
                 logger.info("Created agent_events table")
 
+            # --- 2b. Create artifacts table if missing (PostgreSQL only) ---
+            if is_postgres and not await _table_exists(conn, "artifacts", is_postgres):
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS artifacts (
+                        id VARCHAR(36) NOT NULL PRIMARY KEY,
+                        user_id VARCHAR(36) NOT NULL,
+                        conversation_id VARCHAR(36),
+                        run_id VARCHAR(36),
+                        filename VARCHAR(255) NOT NULL,
+                        relative_path VARCHAR(500) NOT NULL,
+                        mime_type VARCHAR(100),
+                        size_bytes INTEGER NOT NULL DEFAULT 0,
+                        storage_key VARCHAR(500) NOT NULL,
+                        checksum VARCHAR(64),
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,
+                        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE SET NULL
+                    )
+                """))
+                for idx_col in ["user_id", "conversation_id", "run_id"]:
+                    await conn.execute(text(
+                        f"CREATE INDEX IF NOT EXISTS ix_artifacts_{idx_col} "
+                        f"ON artifacts ({idx_col})"
+                    ))
+                logger.info("Created artifacts table")
+
             # --- 3. Stamp alembic_version to HEAD ---
             await _stamp_alembic_head(conn, is_postgres)
 
@@ -118,12 +152,12 @@ async def _stamp_alembic_head(conn, is_postgres: bool) -> None:
         # Check if already stamped
         result = await conn.execute(text("SELECT version_num FROM alembic_version"))
         current = result.scalar()
-        if current != "a1b2c3d4e5f7":
+        if current != "c3d4e5f6a7b8":
             await conn.execute(text("DELETE FROM alembic_version"))
             await conn.execute(text(
                 "INSERT INTO alembic_version (version_num) VALUES (:v)"
-            ), {"v": "a1b2c3d4e5f7"})
-            logger.info("Stamped alembic_version to HEAD (a1b2c3d4e5f7)")
+            ), {"v": "c3d4e5f6a7b8"})
+            logger.info("Stamped alembic_version to HEAD (c3d4e5f6a7b8)")
         else:
             logger.info("Alembic already at HEAD")
     else:
@@ -134,9 +168,9 @@ async def _stamp_alembic_head(conn, is_postgres: bool) -> None:
         """))
         result = await conn.execute(text("SELECT version_num FROM alembic_version"))
         current = result.scalar()
-        if current != "a1b2c3d4e5f7":
+        if current != "c3d4e5f6a7b8":
             await conn.execute(text("DELETE FROM alembic_version"))
             await conn.execute(text(
                 "INSERT INTO alembic_version (version_num) VALUES (:v)"
-            ), {"v": "a1b2c3d4e5f7"})
-            logger.info("Stamped alembic_version to HEAD (a1b2c3d4e5f7)")
+            ), {"v": "c3d4e5f6a7b8"})
+            logger.info("Stamped alembic_version to HEAD (c3d4e5f6a7b8)")

@@ -24,6 +24,7 @@ from config import get_settings
 from models.conversation import Conversation, Message
 from schemas.chat import ConversationCreate, ConversationDetail, ConversationResponse, MessageCreate, MessageResponse
 from services.llm_client import ChatMessage, ModelUnavailableError, OllamaClient
+from services.provider_health import provider_health
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,22 @@ class ChatService:
 
             # Stream from LLM
             finish_reason = "stop"
-            stream = await self.llm.chat(model=model, messages=history, stream=True)
+            try:
+                stream = await self.llm.chat(model=model, messages=history, stream=True)
+            except ModelUnavailableError as primary_exc:
+                # Provider failover: try alternative providers
+                logger.warning("Primary LLM failed, attempting failover: %s", primary_exc)
+                from services.provider_health import provider_health
+                provider_health.record_failure(str(self.llm.__class__.__name__), model, str(primary_exc))
+
+                # Try failover providers
+                fallback_llm = await self._get_failover_llm(model)
+                if fallback_llm:
+                    logger.info("Attempting failover to %s", fallback_llm.__class__.__name__)
+                    stream = await fallback_llm.chat(model=model, messages=history, stream=True)
+                else:
+                    raise
+
             async for token in stream:  # type: ignore[union-attr]
                 full_content += token
                 token_count += 1
@@ -297,6 +313,47 @@ class ChatService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    async def _get_failover_llm(self, model: str):
+        """Try alternative providers when the primary one fails."""
+        try:
+            from sqlalchemy import select as _select
+            from models.provider import LLMProvider as _P
+            from services.llm_client import build_provider as _build
+            from services.provider_health import provider_health
+
+            # Get all enabled providers
+            result = await self.db.execute(
+                _select(_P).where(_P.enabled == True)
+            )
+            providers = list(result.scalars().all())
+
+            # Skip the current provider
+            current_provider_name = self.llm.__class__.__name__
+            for p in providers:
+                if p.provider_type in ("ollama",):
+                    continue  # Skip local Ollama for failover
+                try:
+                    provider_key = f"{p.provider_type}:{p.name}"
+                    health = provider_health.get(provider_key)
+                    if not health.is_available():
+                        continue  # Skip unhealthy providers
+
+                    failover_llm = _build(
+                        provider_type=p.provider_type,
+                        base_url=p.base_url,
+                        api_key=p.api_key,
+                        custom_headers=p.custom_headers if hasattr(p, 'custom_headers') and p.custom_headers else None,
+                    )
+                    # Quick health check
+                    healthy, _ = await failover_llm.health_check(model)
+                    if healthy:
+                        return failover_llm
+                except Exception as exc:
+                    logger.debug("Failover provider %s failed health check: %s", p.name, exc)
+                    continue
+        except Exception as exc:
+            logger.warning("Failover resolution failed: %s", exc)
+        return None
     def _map_message(self, m: Message) -> MessageResponse:
         meta: dict | None = None
         if m.metadata_json:

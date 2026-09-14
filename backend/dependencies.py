@@ -26,7 +26,7 @@ def get_llm_client() -> OllamaClient:
     return _llm_client
 
 
-def resolve_llm_for_role_async(db: AsyncSession, role: str):
+async def resolve_llm_for_role_async(db: AsyncSession, role: str):
     """
     Return the LLM client for a given role ("chat" | "embedding" | "vision").
 
@@ -61,6 +61,73 @@ def resolve_llm_for_role_async(db: AsyncSession, role: str):
         )
 
     return _resolve()
+
+
+async def resolve_llm_with_failover(
+    db: AsyncSession,
+    role: str,
+    exclude_provider_id: str | None = None,
+    error: str | None = None,
+):
+    """
+    Resolve an LLM client with provider failover.
+
+    When the primary provider fails (429, timeout, 5xx), this function
+    tries the next available provider for the same role.
+
+    Returns: (llm_client, provider_id) or raises if no providers available.
+    """
+    from services.model_service import _load_roles
+    from services.llm_client import build_provider
+    from sqlalchemy import select as _select
+    from models.provider import LLMProvider
+    from services.provider_health import get_health_tracker, classify_provider_error
+
+    health_tracker = get_health_tracker()
+
+    # If there was an error, record it for the failing provider
+    if error and exclude_provider_id:
+        is_rate_limit, _ = classify_provider_error(error)
+        health_tracker.record_failure(exclude_provider_id, error, is_rate_limit)
+
+    # Get all providers bound to this role, or all enabled providers
+    roles = _load_roles()
+    provider_id = roles.get(f"{role}_provider_id")
+
+    # Get all enabled providers
+    result = await db.execute(
+        _select(LLMProvider).where(LLMProvider.enabled == True)
+    )
+    all_providers = list(result.scalars().all())
+
+    # Sort: prefer the bound provider, then by health
+    def sort_key(p):
+        health = health_tracker.get(p.id)
+        return (0 if p.id == provider_id else 1, health.consecutive_failures, health.avg_latency_ms)
+
+    all_providers.sort(key=sort_key)
+
+    # Try each provider
+    for prov in all_providers:
+        if prov.id == exclude_provider_id:
+            continue  # Skip the one that just failed
+        health = health_tracker.get(prov.id)
+        if not health.is_available():
+            continue  # Skip unhealthy providers
+        try:
+            client = build_provider(
+                provider_type=prov.provider_type,
+                base_url=prov.base_url,
+                api_key=prov.api_key,
+                custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None,
+            )
+            return client, prov.id
+        except Exception as exc:
+            health_tracker.record_failure(prov.id, str(exc))
+            continue
+
+    # Fallback to default Ollama
+    return get_llm_client(), None
 
 
 # ------------------------------------------------------------------

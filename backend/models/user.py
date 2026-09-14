@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from models.conversation import Conversation
     from models.knowledge_base import KnowledgeBase
     from models.agent import AgentRun
+    from models.artifact import Artifact
 
 
 class User(Base, TimestampMixin):
@@ -36,6 +37,9 @@ class User(Base, TimestampMixin):
     )
     knowledge_bases: Mapped[list["KnowledgeBase"]] = relationship(
         back_populates="owner"
+    )
+    artifacts: Mapped[list["Artifact"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:

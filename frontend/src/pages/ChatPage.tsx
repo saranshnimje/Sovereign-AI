@@ -13,6 +13,76 @@ import EvidencePanel from '../components/chat/EvidencePanel'
 import ToolCallCard, { ToolCall } from '../components/chat/ToolCallCard'
 import AgentActivity from '../components/chat/AgentActivity'
 import AgentTimeline from '../components/chat/AgentTimeline'
+import { agentsApi } from '../api/agents'
+
+interface AskUserCardProps {
+  question: string
+  options: string[]
+  runId: string
+  convId: string
+  onAnswer: (answer: string) => Promise<void>
+}
+
+function AskUserCard({ question, options, onAnswer }: AskUserCardProps) {
+  const [customAnswer, setCustomAnswer] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const handleSubmit = async (answer: string) => {
+    if (!answer.trim() || submitting) return
+    setSubmitting(true)
+    try {
+      await onAnswer(answer.trim())
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="mb-3 p-4 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">
+      <div className="flex items-start gap-2 mb-3">
+        <span className="text-cyan-400 text-lg">❓</span>
+        <div className="flex-1">
+          <p className="text-sm font-medium text-cyan-300">Agent needs your input</p>
+          <p className="text-sm text-neutral-200 mt-1">{question}</p>
+        </div>
+      </div>
+
+      {options.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-3">
+          {options.map((opt, i) => (
+            <button
+              key={i}
+              onClick={() => handleSubmit(opt)}
+              disabled={submitting}
+              className="px-3 py-1.5 bg-surface border border-surface-border rounded-md text-sm text-neutral-200 hover:bg-surface-muted hover:border-cyan-500/50 disabled:opacity-50 transition-colors"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={customAnswer}
+          onChange={(e) => setCustomAnswer(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(customAnswer) } }}
+          placeholder="Type your answer..."
+          disabled={submitting}
+          className="flex-1 px-3 py-1.5 bg-surface border border-surface-border rounded-md text-sm text-neutral-200 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-50"
+        />
+        <button
+          onClick={() => handleSubmit(customAnswer)}
+          disabled={!customAnswer.trim() || submitting}
+          className="px-3 py-1.5 bg-cyan-600 text-white rounded-md text-sm font-medium hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {submitting ? 'Sending...' : 'Submit'}
+        </button>
+      </div>
+    </div>
+  )
+}
 
 interface ChatModelOption {
   providerId: string | null
@@ -287,6 +357,7 @@ export default function ChatPage() {
       subagents: [],
       verificationStatus: 'none',
       verificationType: null,
+      askUser: null,
     })
   }, [convId, activeStreams, updateStream])
 
@@ -471,6 +542,18 @@ export default function ChatPage() {
             // Observation from tool execution
             updateStream(convId, { agentState: d.description || 'observing' })
             storeEvent('observation', d)
+          } else if (ev === 'ask_user') {
+            // ASK_USER: Agent needs input from the user
+            updateStream(convId, {
+              streaming: false,
+              agentState: 'awaiting_user',
+              askUser: {
+                question: d.question || '',
+                options: d.options || [],
+                runId: d.run_id || '',
+              },
+            })
+            storeEvent('ask_user', d)
           } else if (ev === 'final_response') {
             // Final response content — store in durable state before done clears streaming
             // This is the critical handoff: response content persisted to DB by backend,
@@ -1187,6 +1270,28 @@ export default function ChatPage() {
               model={`${activeModel.providerName} / ${activeModel.modelName}`}
               sources={streamSources}
               onStop={handleStop}
+            />
+          )}
+
+          {/* ASK_USER: Interactive question card */}
+          {activeStream?.askUser && !isStreaming && (
+            <AskUserCard
+              question={activeStream.askUser.question}
+              options={activeStream.askUser.options}
+              runId={activeStream.askUser.runId}
+              convId={convId!}
+              onAnswer={async (answer) => {
+                try {
+                  await agentsApi.answerQuestion(activeStream.askUser!.runId, answer)
+                  updateStream(convId!, { askUser: null, streaming: true, agentState: 'running' })
+                  // Refresh conversation detail
+                  const d = await chatApi.getConversation(convId!)
+                  setDetail(d)
+                  detailRef.current = d
+                } catch (err: any) {
+                  addToast({ type: 'error', title: 'Answer failed', message: err?.response?.data?.detail || 'Failed to submit answer' })
+                }
+              }}
             />
           )}
 

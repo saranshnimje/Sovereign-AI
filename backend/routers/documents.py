@@ -1,5 +1,5 @@
 """
-Documents router — top-level document upload / list / get / retry / delete.
+Documents router — top-level document upload / list / get / retry / delete / preview / download.
 
 This is the canonical document API surface used by the integration suite:
 
@@ -8,15 +8,20 @@ This is the canonical document API surface used by the integration suite:
     GET    /documents/{doc_id}      status + processing_steps (404 foreign)
     POST   /documents/{doc_id}/retry  re-run pipeline for a FAILED doc (200/409)
     DELETE /documents/{doc_id}      404 foreign / 204-able delete
+    GET    /documents/{doc_id}/preview  returns document text content (404 foreign)
+    GET    /documents/{doc_id}/download  streams the original file (404 foreign)
 
 Tenancy is enforced via services.kb_access — any missing OR unauthorised
 resource returns a deliberate 404 (never 403), so existence is not leaked.
 """
 import json
 import logging
+import mimetypes
+import os
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -27,6 +32,7 @@ from services.document_service import DocumentService
 from services.embedding_service import EmbeddingService
 from services.kb_access import get_document_checked
 from services.qdrant_service import QdrantService
+from utils.rate_limit import ai_rate_limit, upload_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +69,7 @@ async def upload_document(
     background_tasks: BackgroundTasks = BackgroundTasks(),
     _user: User = AnalystRequired,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(upload_rate_limit),
 ):
     """
     Upload a document into a knowledge base the user may access.
@@ -129,6 +136,81 @@ async def delete_document(
     svc = _doc_service(db)
     await svc.delete_document_checked(None, doc_id, user)
     return {"detail": "Document deleted"}
+
+
+@router.get("/{doc_id}/preview")
+async def preview_document(
+    doc_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(ai_rate_limit),
+):
+    """
+    Return document text content for in-browser preview.
+
+    For text-based files (txt, md, csv, json, log, etc.) the raw text is
+    returned. For PDF/image/docx the caller should fall back to download.
+    Tenancy is enforced: 404 for missing OR foreign documents.
+    """
+    doc, _kb = await get_document_checked(db, doc_id, user)
+
+    if not doc.storage_path or not os.path.exists(doc.storage_path):
+        raise HTTPException(404, "Document file not found on disk")
+
+    ext = doc.original_name.rsplit(".", 1)[-1].lower() if "." in doc.original_name else ""
+    text_exts = {"txt", "md", "markdown", "csv", "json", "log", "ini", "cfg", "conf",
+                 "yaml", "yml", "toml", "xml", "html", "css", "js", "ts", "tsx",
+                 "jsx", "py", "rb", "go", "rs", "java", "c", "cpp", "h", "hpp",
+                 "cs", "php", "sh", "bash", "sql"}
+
+    if ext in text_exts or (doc.mime_type and doc.mime_type.startswith("text/")):
+        try:
+            with open(doc.storage_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read(512 * 1024)  # cap at 512 KB for preview
+        except Exception as exc:
+            logger.warning("Failed to read doc %s: %s", doc_id, exc)
+            raise HTTPException(500, "Failed to read document")
+        return {
+            "content": content,
+            "filename": doc.original_name,
+            "mime_type": doc.mime_type,
+            "truncated": os.path.getsize(doc.storage_path) > 512 * 1024,
+        }
+
+    # Non-text files: signal the frontend to use download instead
+    return {
+        "content": None,
+        "filename": doc.original_name,
+        "mime_type": doc.mime_type,
+        "truncated": False,
+        "binary": True,
+    }
+
+
+@router.get("/{doc_id}/download")
+async def download_document(
+    doc_id: str,
+    token: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(ai_rate_limit),
+):
+    """
+    Stream the original file for download. Tenancy enforced via 404.
+    Accepts optional ?token= query param for iframe/link-based downloads
+    where the Authorization header cannot be set (same pattern as artifacts).
+    """
+    doc, _kb = await get_document_checked(db, doc_id, user)
+
+    if not doc.storage_path or not os.path.exists(doc.storage_path):
+        raise HTTPException(404, "Document file not found on disk")
+
+    media_type = doc.mime_type or mimetypes.guess_type(doc.original_name)[0] or "application/octet-stream"
+    return FileResponse(
+        path=doc.storage_path,
+        filename=doc.original_name,
+        media_type=media_type,
+    )
 
 
 async def get_kb_checked_for_upload(db: AsyncSession, kb_id: str, user: User):

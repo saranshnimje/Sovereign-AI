@@ -34,4 +34,6 @@ export const agentsApi = {
   getRun: (id: string) => api.get<AgentRun>(`/agents/runs/${id}`).then(r => r.data),
   getToolCalls: (runId: string) => api.get<ToolCallRecord[]>(`/agents/runs/${runId}/tool-calls`).then(r => r.data),
   cancelRun: (id: string) => api.post(`/agents/runs/${id}/cancel`).then(r => r.data),
+  answerQuestion: (runId: string, answer: string) =>
+    api.post(`/agents/runs/${runId}/answer`, { answer }).then(r => r.data),
 }

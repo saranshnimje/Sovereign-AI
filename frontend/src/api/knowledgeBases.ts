@@ -22,6 +22,7 @@ export interface Document {
   page_count: number | null
   chunk_count: number | null
   error_message: string | null
+  size_bytes?: number
   created_at: string
 }
 
@@ -30,6 +31,16 @@ export interface KBCreate {
   description?: string
   embedding_model?: string
 }
+
+export interface DocumentPreview {
+  content: string | null
+  filename: string
+  mime_type: string
+  truncated: boolean
+  binary?: boolean
+}
+
+const API_BASE = import.meta.env.VITE_API_URL || ''
 
 export const knowledgeBasesApi = {
   list: () => api.get<KnowledgeBase[]>('/knowledge-bases/').then(r => r.data),
@@ -45,4 +56,10 @@ export const knowledgeBasesApi = {
     }).then(r => r.data)
   },
   deleteDocument: (kbId: string, docId: string) => api.delete(`/knowledge-bases/${kbId}/documents/${docId}`),
+  previewDocument: (docId: string) =>
+    api.get<DocumentPreview>(`/documents/${docId}/preview`).then(r => r.data),
+  downloadDocumentUrl: (docId: string): string => {
+    const token = localStorage.getItem('access_token') || ''
+    return `${API_BASE}/api/v1/documents/${docId}/download?token=${token}`
+  },
 }

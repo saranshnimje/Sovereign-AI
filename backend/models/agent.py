@@ -23,7 +23,7 @@ class AgentRun(Base, TimestampMixin):
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, default="pending"
-    )  # pending | running | completed | failed | awaiting_approval | cancelled | timed_out
+    )  # pending | running | completed | failed | awaiting_approval | cancelled | timed_out | awaiting_user
     plan_json: Mapped[str | None] = mapped_column("plan", Text, nullable=True)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     step_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -39,6 +39,17 @@ class AgentRun(Base, TimestampMixin):
     context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_verification_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Explicit run ↔ message association (fixes timeline sharing across messages)
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    message_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # ASK_USER: question text and options for interactive pause
+    pending_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_options_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="agent_runs")
     tool_calls: Mapped[list["ToolCall"]] = relationship(

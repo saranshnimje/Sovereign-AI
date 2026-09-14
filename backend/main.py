@@ -18,7 +18,7 @@ from database import init_db
 from routers import (
     auth, chat, models, system, audit, providers, settings as settings_router,
     knowledge_bases, agents, tools, plugins, incidents, data, approvals, documents,
-    sensor_analysis, vision,
+    sensor_analysis, vision, artifacts,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -128,6 +128,7 @@ def create_app() -> FastAPI:
     app.include_router(documents.router,        prefix=f"{prefix}/documents")
     app.include_router(sensor_analysis.router,  prefix=f"{prefix}/sensor-analyses")
     app.include_router(vision.router,           prefix=f"{prefix}")
+    app.include_router(artifacts.router,         prefix=f"{prefix}/artifacts")
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError):

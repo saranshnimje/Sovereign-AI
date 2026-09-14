@@ -1,179 +1,198 @@
-import { useEffect, useState, useRef } from 'react'
-import { dataApi, Organization, DataSource, SensorAnalysis } from '../api/data'
+import { useEffect, useState, useCallback } from 'react'
+import { artifactsApi, Artifact } from '../api/artifacts'
 import { useUIStore } from '../stores/uiStore'
 import Badge from '../components/ui/Badge'
+import ArtifactPreviewModal from '../components/artifacts/ArtifactPreviewModal'
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+}
+
+function formatDate(d: string | null): string {
+  if (!d) return '—'
+  return new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function fileIcon(mime: string | null, filename: string): string {
+  if (mime?.startsWith('image/')) return '🖼️'
+  if (mime === 'application/pdf') return '📄'
+  if (mime === 'text/csv' || filename.endsWith('.csv')) return '📊'
+  if (mime === 'application/json' || filename.endsWith('.json')) return '🔧'
+  if (mime?.startsWith('text/markdown') || filename.endsWith('.md')) return '📝'
+  if (mime?.startsWith('text/') || filename.match(/\.(js|ts|py|rb|go|rs|java|c|cpp|sh|sql|yaml|yml|toml|xml|html|css)$/)) return '💻'
+  return '📎'
+}
 
 export default function DataPage() {
   const { addToast } = useUIStore()
-  const [orgs, setOrgs] = useState<Organization[]>([])
-  const [analyses, setAnalyses] = useState<SensorAnalysis[]>([])
+  const [artifacts, setArtifacts] = useState<Artifact[]>([])
   const [loading, setLoading] = useState(true)
-  const [tab, setTab] = useState<'organizations' | 'sensor'>('organizations')
-  const [showCreateOrg, setShowCreateOrg] = useState(false)
-  const [newOrgName, setNewOrgName] = useState('')
-  const [newOrgDesc, setNewOrgDesc] = useState('')
-  const [newOrgIndustry, setNewOrgIndustry] = useState('')
-  const [newOrgLocation, setNewOrgLocation] = useState('')
-  const [uploading, setUploading] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
+  const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
 
-  useEffect(() => {
-    const load = async () => {
-      const [o, s] = await Promise.allSettled([dataApi.listOrgs(), dataApi.listSensorAnalyses()])
-      if (o.status === 'fulfilled') setOrgs(o.value)
-      if (s.status === 'fulfilled') setAnalyses(s.value)
-      setLoading(false)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await artifactsApi.listArtifacts()
+      setArtifacts(data)
+    } catch {
+      addToast({ type: 'error', title: 'Failed to load artifacts' })
     }
-    load()
-  }, [])
+    setLoading(false)
+  }, [addToast])
 
-  const handleCreateOrg = async (e: React.FormEvent) => {
-    e.preventDefault()
+  useEffect(() => { load() }, [load])
+
+  const handleDelete = async (artifact: Artifact) => {
+    if (!window.confirm(`Delete "${artifact.filename}"? This cannot be undone.`)) return
+    setDeleting(artifact.id)
     try {
-      const org = await dataApi.createOrg({
-        name: newOrgName,
-        description: newOrgDesc || undefined,
-        industry: newOrgIndustry || undefined,
-        location: newOrgLocation || undefined,
-      })
-      setOrgs(prev => [...prev, org])
-      setShowCreateOrg(false); setNewOrgName(''); setNewOrgDesc(''); setNewOrgIndustry(''); setNewOrgLocation('')
-      addToast({ type: 'success', title: 'Organization created' })
-    } catch { addToast({ type: 'error', title: 'Create failed' }) }
+      await artifactsApi.deleteArtifact(artifact.id)
+      setArtifacts(prev => prev.filter(a => a.id !== artifact.id))
+      addToast({ type: 'info', title: 'Artifact deleted', message: artifact.filename })
+    } catch {
+      addToast({ type: 'error', title: 'Delete failed' })
+    }
+    setDeleting(null)
   }
 
-  const handleUploadSensor = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setUploading(true)
+  const handleDownload = async (artifact: Artifact) => {
     try {
-      const analysis = await dataApi.uploadSensorData(file)
-      setAnalyses(prev => [analysis, ...prev])
-      addToast({ type: 'success', title: 'Uploaded', message: file.name })
-    } catch { addToast({ type: 'error', title: 'Upload failed' }) }
-    setUploading(false)
-    if (fileRef.current) fileRef.current.value = ''
+      const url = await artifactsApi.downloadUrl(artifact.id)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = artifact.filename
+      a.click()
+    } catch {
+      addToast({ type: 'error', title: 'Download failed' })
+    }
   }
 
-  const statusColors: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'default'> = {
-    completed: 'success', processing: 'warning', pending: 'info', failed: 'danger',
-  }
+  const filtered = artifacts.filter(a =>
+    !searchQuery || a.filename.toLowerCase().includes(searchQuery.toLowerCase()) || (a.mime_type ?? '').toLowerCase().includes(searchQuery.toLowerCase())
+  )
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-lg md:text-2xl font-bold text-white">Data</h1>
-        <p className="text-xs md:text-sm text-neutral-400 mt-1">Manage organizations, data sources, and sensor analytics.</p>
-      </div>
-
-      <div className="flex gap-2">
-        <button onClick={() => setTab('organizations')}
-          className={`px-4 py-2 text-sm rounded-lg border transition-colors ${tab === 'organizations' ? 'bg-cyan-600 text-white border-cyan-600' : 'border-surface-border text-neutral-400 hover:bg-surface-muted'}`}>
-          Organizations
-        </button>
-        <button onClick={() => setTab('sensor')}
-          className={`px-4 py-2 text-sm rounded-lg border transition-colors ${tab === 'sensor' ? 'bg-cyan-600 text-white border-cyan-600' : 'border-surface-border text-neutral-400 hover:bg-surface-muted'}`}>
-          Sensor Data
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-lg md:text-2xl font-bold text-white">Artifacts</h1>
+          <p className="text-xs md:text-sm text-neutral-400 mt-1">Browse, preview, and download agent-generated files.</p>
+        </div>
+        <button onClick={load} className="px-3 md:px-4 py-2 border border-surface-border text-neutral-300 rounded-lg text-sm font-medium hover:bg-surface-muted transition-colors">
+          Refresh
         </button>
       </div>
 
+      {/* Search */}
+      <div className="relative max-w-md">
+        <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          placeholder="Search artifacts..."
+          className="w-full pl-9 pr-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-sm text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+        />
+      </div>
+
+      {/* Stats bar */}
+      {!loading && artifacts.length > 0 && (
+        <div className="flex items-center gap-4 text-[11px] text-neutral-500">
+          <span>{artifacts.length} artifact{artifacts.length !== 1 ? 's' : ''}</span>
+          <span>·</span>
+          <span>{formatBytes(artifacts.reduce((sum, a) => sum + a.size_bytes, 0))} total</span>
+          {searchQuery && <span className="text-cyan-500">({filtered.length} matching)</span>}
+        </div>
+      )}
+
+      {/* Content */}
       {loading ? (
-        <div className="space-y-3">{[...Array(3)].map((_, i) => <div key={i} className="skeleton h-20" />)}</div>
-      ) : tab === 'organizations' ? (
-        <div className="space-y-4">
-          <div className="flex justify-end">
-            <button onClick={() => setShowCreateOrg(true)} className="px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500">
-              + Create Organization
-            </button>
+        <div className="space-y-3">
+          {[...Array(5)].map((_, i) => <div key={i} className="skeleton h-20" />)}
+        </div>
+      ) : artifacts.length === 0 ? (
+        <div className="bg-surface-raised border border-surface-border rounded-xl p-12 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 flex items-center justify-center text-3xl mx-auto mb-4">
+            <svg className="w-8 h-8 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m6.75 12H9.75m-3.75 3H6.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V18.75m-7.5-12h.008v.008H9.75V9.75zm0 3h.008v.008H9.75V12.75zm0 3h.008v.008H9.75v-.008z" />
+            </svg>
           </div>
-          {showCreateOrg && (
-            <div className="bg-surface-raised border border-surface-border rounded-xl p-6">
-              <form onSubmit={handleCreateOrg} className="space-y-4">
-                <input type="text" value={newOrgName} onChange={e => setNewOrgName(e.target.value)} required placeholder="Organization name"
-                  className="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-2 focus:ring-cyan-500" />
-                <input type="text" value={newOrgDesc} onChange={e => setNewOrgDesc(e.target.value)} placeholder="Description (optional)"
-                  className="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-2 focus:ring-cyan-500" />
-                <div className="grid grid-cols-2 gap-3">
-                  <input type="text" value={newOrgIndustry} onChange={e => setNewOrgIndustry(e.target.value)} placeholder="Industry (e.g. Technology)"
-                    className="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-2 focus:ring-cyan-500" />
-                  <input type="text" value={newOrgLocation} onChange={e => setNewOrgLocation(e.target.value)} placeholder="Location (e.g. Mumbai, India)"
-                    className="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-2 focus:ring-cyan-500" />
-                </div>
-                <div className="flex gap-2">
-                  <button type="submit" disabled={!newOrgName.trim()} className="px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500 disabled:opacity-50">Create</button>
-                  <button type="button" onClick={() => setShowCreateOrg(false)} className="px-4 py-2 border border-surface-border text-neutral-300 rounded-lg text-sm hover:bg-surface-muted">Cancel</button>
-                </div>
-              </form>
-            </div>
-          )}
-          {orgs.length === 0 ? (
-            <div className="bg-surface-raised border border-surface-border rounded-xl p-12 text-center">
-              <h3 className="text-lg font-semibold text-white mb-2">No Organizations</h3>
-              <p className="text-sm text-neutral-400">Create an organization to manage data sources.</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {orgs.map(org => (
-                <div key={org.id} className="bg-surface-raised border border-surface-border rounded-xl p-5 hover:border-cyan-700/50 transition-all">
-                  <h3 className="font-semibold text-white text-sm mb-1">{org.name}</h3>
-                  {org.industry && <p className="text-[10px] text-cyan-400 uppercase tracking-wider mb-1">{org.industry}</p>}
-                  {org.description && <p className="text-xs text-neutral-400 mb-2">{org.description}</p>}
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-neutral-500">
-                    {org.location && <span>📍 {org.location}</span>}
-                    {org.ceo && <span>👤 {org.ceo}</span>}
-                    {org.employee_count && <span>👥 {org.employee_count}</span>}
-                    {org.revenue && <span>💰 {org.revenue}</span>}
-                  </div>
-                  {org.details && (
-                    <div className="mt-3 pt-3 border-t border-surface-border">
-                      <div className="flex gap-4 text-[10px] text-neutral-500">
-                        {Array.isArray(org.details.employees) && <span>{org.details.employees.length} employees</span>}
-                        {Array.isArray(org.details.departments) && <span>{org.details.departments.length} departments</span>}
-                        {Array.isArray(org.details.infrastructure) && <span>{org.details.infrastructure.length} assets</span>}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
+          <h3 className="text-lg font-semibold text-white mb-2">No Artifacts</h3>
+          <p className="text-sm text-neutral-400">Agent-generated files will appear here as they are created.</p>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="bg-surface-raised border border-surface-border rounded-xl p-8 text-center">
+          <p className="text-sm text-neutral-400">No artifacts match "{searchQuery}"</p>
         </div>
       ) : (
-        <div className="space-y-4">
-          <div className="flex justify-end">
-            <input ref={fileRef} type="file" className="hidden" onChange={handleUploadSensor} accept=".csv" />
-            <button onClick={() => fileRef.current?.click()} disabled={uploading}
-              className="px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-500 disabled:opacity-50">
-              {uploading ? 'Uploading...' : '+ Upload CSV'}
-            </button>
-          </div>
-          {analyses.length === 0 ? (
-            <div className="bg-surface-raised border border-surface-border rounded-xl p-12 text-center">
-              <h3 className="text-lg font-semibold text-white mb-2">No Sensor Data</h3>
-              <p className="text-sm text-neutral-400">Upload a CSV file to analyze sensor data.</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {analyses.map(a => (
-                <div key={a.id} className="bg-surface-raised border border-surface-border rounded-xl p-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm">📊</span>
-                      <div>
-                        <p className="text-sm text-neutral-200">{a.original_name}</p>
-                        <p className="text-[10px] text-neutral-500">{a.row_count || 0} rows</p>
-                      </div>
+        <div className="space-y-2">
+          {filtered.map(artifact => (
+            <div
+              key={artifact.id}
+              className="bg-surface-raised border border-surface-border rounded-xl p-4 hover:border-cyan-700/50 transition-all"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <span className="text-xl flex-shrink-0">{fileIcon(artifact.mime_type, artifact.filename)}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-neutral-200 truncate">{artifact.filename}</p>
+                    <div className="flex items-center gap-2 text-[10px] text-neutral-500 mt-0.5">
+                      <span>{formatBytes(artifact.size_bytes)}</span>
+                      <span>·</span>
+                      <span>{artifact.mime_type || 'unknown type'}</span>
+                      <span>·</span>
+                      <span>{formatDate(artifact.created_at)}</span>
                     </div>
-                    <Badge variant={statusColors[a.status] || 'default'} size="sm">{a.status}</Badge>
                   </div>
-                  {a.ai_explanation && (
-                    <p className="text-xs text-neutral-400 mt-2 pl-8">{a.ai_explanation.slice(0, 200)}...</p>
-                  )}
                 </div>
-              ))}
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    onClick={() => setPreviewArtifact(artifact)}
+                    className="px-3 py-1.5 text-xs bg-cyan-600 text-white rounded-lg hover:bg-cyan-500 transition-colors"
+                  >
+                    Preview
+                  </button>
+                  <button
+                    onClick={() => handleDownload(artifact)}
+                    className="px-3 py-1.5 text-xs border border-surface-border text-neutral-300 rounded-lg hover:bg-surface-muted transition-colors"
+                  >
+                    Download
+                  </button>
+                  <button
+                    onClick={() => handleDelete(artifact)}
+                    disabled={deleting === artifact.id}
+                    className="px-3 py-1.5 text-xs border border-danger-500/30 text-danger-500 rounded-lg hover:bg-danger-500/10 transition-colors disabled:opacity-50"
+                  >
+                    {deleting === artifact.id ? '...' : 'Delete'}
+                  </button>
+                </div>
+              </div>
+              {artifact.conversation_id && (
+                <div className="mt-2 flex items-center gap-2">
+                  <Badge variant="info" size="sm">conversation</Badge>
+                  <span className="text-[10px] text-neutral-500 font-mono truncate">{artifact.conversation_id}</span>
+                </div>
+              )}
             </div>
-          )}
+          ))}
         </div>
+      )}
+
+      {/* Preview Modal */}
+      {previewArtifact && (
+        <ArtifactPreviewModal
+          artifact={previewArtifact}
+          onClose={() => setPreviewArtifact(null)}
+        />
       )}
     </div>
   )
