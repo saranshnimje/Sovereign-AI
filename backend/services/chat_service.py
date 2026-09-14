@@ -191,8 +191,6 @@ class ChatService:
             except ModelUnavailableError as primary_exc:
                 # Provider failover: try alternative providers
                 logger.warning("Primary LLM failed, attempting failover: %s", primary_exc)
-                from services.provider_health import provider_health
-                provider_health.record_failure(str(self.llm.__class__.__name__), model, str(primary_exc))
 
                 # Try failover providers
                 fallback_llm = await self._get_failover_llm(model)
@@ -333,7 +331,7 @@ class ChatService:
                 if p.provider_type in ("ollama",):
                     continue  # Skip local Ollama for failover
                 try:
-                    provider_key = f"{p.provider_type}:{p.name}"
+                    provider_key = p.id
                     health = provider_health.get(provider_key)
                     if not health.is_available():
                         continue  # Skip unhealthy providers

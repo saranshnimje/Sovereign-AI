@@ -388,6 +388,11 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                                 yield delta
                         except json.JSONDecodeError:
                             continue
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500] if exc.response else ""
+            raise ModelUnavailableError(
+                f"HTTP {exc.response.status_code} during streaming | Response: {body}"
+            ) from exc
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise ModelUnavailableError(str(exc)) from exc
 

@@ -66,7 +66,7 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
                     )
                 """))
                 await conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS idx_agent_events_run_seq "
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_events_run_seq "
                     "ON agent_events (run_id, \"sequence\")"
                 ))
                 # Add FK constraint if missing
@@ -79,6 +79,18 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
                 except Exception:
                     pass  # FK constraint may already exist
                 logger.info("Created agent_events table")
+            elif is_postgres:
+                # Ensure unique constraint exists (upgrade from non-unique index)
+                try:
+                    await conn.execute(text(
+                        "DROP INDEX IF EXISTS idx_agent_events_run_seq"
+                    ))
+                    await conn.execute(text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_events_run_seq "
+                        "ON agent_events (run_id, \"sequence\")"
+                    ))
+                except Exception:
+                    pass  # Index may already be unique
 
             # --- 2b. Create artifacts table if missing (PostgreSQL only) ---
             if is_postgres and not await _table_exists(conn, "artifacts", is_postgres):
@@ -152,12 +164,12 @@ async def _stamp_alembic_head(conn, is_postgres: bool) -> None:
         # Check if already stamped
         result = await conn.execute(text("SELECT version_num FROM alembic_version"))
         current = result.scalar()
-        if current != "c3d4e5f6a7b8":
+        if current != "d4e5f6a7b8c9":
             await conn.execute(text("DELETE FROM alembic_version"))
             await conn.execute(text(
                 "INSERT INTO alembic_version (version_num) VALUES (:v)"
-            ), {"v": "c3d4e5f6a7b8"})
-            logger.info("Stamped alembic_version to HEAD (c3d4e5f6a7b8)")
+            ), {"v": "d4e5f6a7b8c9"})
+            logger.info("Stamped alembic_version to HEAD (d4e5f6a7b8c9)")
         else:
             logger.info("Alembic already at HEAD")
     else:
@@ -168,9 +180,9 @@ async def _stamp_alembic_head(conn, is_postgres: bool) -> None:
         """))
         result = await conn.execute(text("SELECT version_num FROM alembic_version"))
         current = result.scalar()
-        if current != "c3d4e5f6a7b8":
+        if current != "d4e5f6a7b8c9":
             await conn.execute(text("DELETE FROM alembic_version"))
             await conn.execute(text(
                 "INSERT INTO alembic_version (version_num) VALUES (:v)"
-            ), {"v": "c3d4e5f6a7b8"})
-            logger.info("Stamped alembic_version to HEAD (c3d4e5f6a7b8)")
+            ), {"v": "d4e5f6a7b8c9"})
+            logger.info("Stamped alembic_version to HEAD (d4e5f6a7b8c9)")

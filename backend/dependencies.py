@@ -60,7 +60,7 @@ async def resolve_llm_for_role_async(db: AsyncSession, role: str):
             custom_headers=provider.custom_headers if hasattr(provider, 'custom_headers') and provider.custom_headers else None,
         )
 
-    return _resolve()
+    return await _resolve()
 
 
 async def resolve_llm_with_failover(
@@ -126,8 +126,13 @@ async def resolve_llm_with_failover(
             health_tracker.record_failure(prov.id, str(exc))
             continue
 
-    # Fallback to default Ollama
-    return get_llm_client(), None
+    # All cloud providers exhausted — do NOT silently fall back to local Ollama.
+    # Raise an explicit error so callers can handle provider unavailability.
+    from services.llm_client import ModelUnavailableError
+    raise ModelUnavailableError(
+        "All configured LLM providers are unavailable. "
+        "Check provider health status and API keys."
+    )
 
 
 # ------------------------------------------------------------------

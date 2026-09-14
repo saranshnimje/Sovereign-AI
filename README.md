@@ -100,43 +100,56 @@ This table describes deployment-model trade-offs; it is not a claim that local m
 flowchart TB
     U["User (browser)"]
 
-    subgraph STACK["Docker Compose — sovereign_network (bridge)"]
-        FE["Frontend<br/>React SPA on nginx :80"]
-        BE["Backend API<br/>FastAPI / uvicorn :8000<br/>JWT auth · RBAC · validation<br/>tool registry · approval gate<br/>audit logging"]
-        QD[("Qdrant v1.9.2<br/>vector DB :6333")]
-        SB["Docker SDK → sandbox containers<br/>(no network · non-root · read-only FS)"]
-        DB[("SQLite (WAL)<br/>users · conversations ·<br/>documents · audit log")]
+    subgraph CLOUD["Cloud Deployment (Production)"]
+        FE["Frontend<br/>React SPA on Vercel"]
+        BE["Backend API<br/>FastAPI on Render :8000<br/>JWT auth · RBAC · validation<br/>tool registry · approval gate<br/>audit logging"]
+        NDB[("Neon PostgreSQL<br/>users · conversations ·<br/>agent_runs · agent_events<br/>artifacts · audit log")]
+        QDC[("Qdrant Cloud<br/>vector DB (hosted)")]
     end
 
-    subgraph HOST["Host machine"]
+    subgraph LOCAL["Local Development"]
+        LFE["Frontend<br/>React SPA on nginx :80"]
+        LBE["Backend API<br/>FastAPI / uvicorn :8000"]
+        LQD[("Qdrant v1.9.2<br/>vector DB :6333")]
+        LDB[("SQLite (WAL)<br/>application persistence")]
         OL[("Ollama :11434<br/>llama3.2:3b · nomic-embed-text")]
-        DS["Named volumes:<br/>backend_data · qdrant_data · ollama_data"]
     end
 
-    CP["Optional cloud providers<br/>(OpenAI-compatible · Anthropic · etc.)"]
+    CP["Cloud LLM providers<br/>(OpenRouter · OpenAI-compatible<br/>Anthropic · Gemini · Cohere)"]
 
     U -->|"HTTPS"| FE
     FE -->|"REST + SSE · /api/v1"| BE
-    BE -->|"embeddings · generation"| OL
-    BE -->|"vector search · upsert"| QD
-    BE --> DB
-    BE -->|"python_exec only"| SB
-    BE -.->|"opt-in, not required"| CP
-    OL --- DS
-    QD --- DS
-    DB --- DS
+    BE -->|"SQL (asyncpg)"| NDB
+    BE -->|"vector search · upsert"| QDC
+    BE -.->|"primary LLM provider"| CP
+
+    U -->|"localhost:80"| LFE
+    LFE -->|"REST + SSE"| LBE
+    LBE --> LDB
+    LBE -->|"embeddings · generation"| OL
+    LBE -->|"vector search"| LQD
+    LBE -.->|"optional cloud providers"| CP
 ```
 
-### Components
+### Components (Production: Vercel → Render → Neon → Qdrant Cloud)
 
 | Component | Role |
 |---|---|
-| **Frontend (React/nginx)** | Single-page app; talks only to the backend REST/SSE API; served by nginx which sets `X-Real-IP` for trustworthy client-IP logging |
-| **Backend API (FastAPI)** | All business logic: authentication, RBAC, document pipeline, RAG orchestration, agent planning loop, tool registry gateway, approval workflow, audit chain |
-| **Ollama** | Local model serving for chat and embedding models; discovered dynamically; seeded automatically at first startup |
-| **Qdrant** | Vector database; one collection per knowledge base / organization for structural isolation |
-| **SQLite (async, WAL)** | Application persistence: users, refresh tokens, conversations, documents, KBs, agent runs, approvals, hash-chained audit events |
-| **Docker sandbox** | Execution environment for the `python_exec` tool; hardened profile detailed in [Security Architecture](#8-security-architecture) |
+| **Frontend (Vercel)** | React SPA; talks only to the backend REST/SSE API |
+| **Backend API (Render)** | All business logic: authentication, RBAC, document pipeline, RAG orchestration, autonomous agent loop, tool registry gateway, approval workflow, audit chain |
+| **Neon PostgreSQL** | Application persistence: users, refresh tokens, conversations, messages, agent_runs, agent_events, artifacts, knowledge_bases, documents, LLM providers, audit events |
+| **Qdrant Cloud** | Vector database; one collection per knowledge base for structural isolation |
+| **Cloud LLM Providers** | OpenRouter, OpenAI-compatible APIs, Anthropic, Gemini, Cohere — selected via frontend model picker |
+
+### Components (Local Development: Docker Compose)
+
+| Component | Role |
+|---|---|
+| **Frontend (nginx)** | React SPA served locally on port 80 |
+| **Backend (FastAPI)** | Same API server, run locally via Docker |
+| **Ollama** | Local model serving for chat and embedding; optional in production |
+| **Qdrant (Docker)** | Local vector DB on port 6333 |
+| **SQLite (WAL)** | Local application persistence (replaced by PostgreSQL in production) |
 
 ## 7. Technology Stack
 
@@ -483,13 +496,13 @@ Automated suites shipped in-repo (`backend/tests/`, pytest asyncio auto-mode):
 | Suite | Contents |
 |---|---|
 | Unit (61 tests) | auth service, approval service, chunker, config/data-dir, embedding, file validator, audit hash chain, qdrant service, RAG, sandbox profile, tool registry permissions, tools |
-| Integration (157 tests) | auth API, agents API, KB API, providers API, provider discovery (incl. key-masking & SSRF cases), tools/plugins API, Phase 4–5 API (settings, SSE, RBAC denials) |
+| Integration (726 tests) | auth API, agents API, KB API, providers API, provider discovery (incl. key-masking & SSRF cases), tools/plugins API, Phase 4–5 API (settings, SSE, RBAC denials), agent architecture regressions |
 
-Recorded verification results from [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) (v1.0 RC, 2026-08-24):
+Recorded verification results from [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) (v2.0, 2026-09-14):
 
 | Check | Result |
 |---|---|
-| Backend tests (61 unit + 157 integration = 218) | ✅ PASS — 218/218 |
+| Backend tests (787 total) | ✅ PASS — 787/787 |
 | TypeScript compilation | ✅ PASS — zero errors |
 | Frontend production build | ✅ PASS |
 | ESLint | ✅ Configured/passing |
@@ -625,12 +638,12 @@ Stated plainly:
 
 - **Hardware-bound performance** — CPU inference is slow for larger models (e.g., ~90–230 s/response observed for `qwen3:14b` on CPU); meaningful quality tiers require significant RAM/VRAM
 - **Model quality varies** — local open-weight models trail frontier cloud models on complex reasoning; RAG answers are bounded by retrieval and model capability
-- **Single-node prototype** — SQLite + single-host Compose target ≤ ~10 concurrent users (per `docs/03_System_Architecture.md`); PostgreSQL/Kubernetes are future scope
+- **Single-node prototype** — SQLite + single-host Compose target ≤ ~10 concurrent users (per `docs/03_System_Architecture.md`); production uses Neon PostgreSQL; Kubernetes is future scope
 - **Initial deployment complexity** — Docker + Ollama + model pulls are one-time hurdles; misconfigured `SECRET_KEY`/URLs are common first-run failures
 - **Optional features need connectivity** — cloud providers, `web_search`/`web_fetch` tools, and initial downloads inherently use the internet
 - **No rate limiting / WAF yet** — request throttling is not implemented in the current prototype
 - **OCR is optional-heavy** — the PaddleOCR engine is commented out of `requirements.txt` (≈2 GB install); scanned-document support requires enabling it explicitly
-- **Point-in-time verification** — recorded test/security results reflect the v1.0 RC snapshot, not continuous assurance
+- **Point-in-time verification** — recorded test/security results reflect the v2.0 snapshot, not continuous assurance
 
 ## 29. Future Scope
 
@@ -650,7 +663,7 @@ Project classified throughout its documentation as **“Internal — SIH 2026 Pr
 
 - **Program:** Smart India Hackathon 2026
 - **Problem statement ID/title:** not specified in the project documentation — to be added once officially assigned
-- **Deliverable:** Sovereign AI Workbench v1.0 release candidate (code, tests, and 19-document engineering dossier in [`docs/`](docs/))
+- **Deliverable:** Sovereign AI Workbench v2.0 (code, tests, and engineering dossier in [`docs/`](docs/))
 
 ## 32. License
 

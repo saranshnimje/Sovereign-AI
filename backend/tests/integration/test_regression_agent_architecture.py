@@ -117,80 +117,148 @@ async def _create_conv(client: AsyncClient, h: dict, title: str = "test"):
 
 
 # ===================================================================
-# 1. CONVERSATION PATH — deterministic, no LLM, no tools, no plan
+# 1. CONVERSATION PATH — LLM understanding, no tools, no plan
 # ===================================================================
 @pytest.mark.asyncio
 class TestConversationPath:
     async def test_greeting_hii_no_plan_no_tools(self, client: AsyncClient):
-        """hii -> CONVERSATION -> direct response, no planner/tools."""
+        """hii -> CONVERSATION -> LLM response, no planner/tools."""
         h = await _setup_user(client, "reg_conv1@test.com", "reg_conv1")
         conv_id = await _create_conv(client, h, "conv test")
 
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "hii", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        body = resp.text
+        call_count = 0
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_understand_resp(
+                    intent="conversation", goal="greet user",
+                    needs_plan=False, needs_tools=False,
+                    needs_verification=False, confidence=1.0,
+                )
+            else:
+                r = MagicMock()
+                r.content = "Hello! How can I help you today?"
+                return r
 
-        events = _parse_sse_events(body)
-        assert "understanding_started" in events
-        assert "understanding_completed" in events
+        with patch("services.llm_client.OllamaClient.chat", side_effect=mock_chat):
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hii", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            assert resp.status_code == 200
+            body = resp.text
 
-        understanding = events["understanding_completed"][0]
-        assert understanding["intent"] == "conversation"
-        assert understanding["needs_plan"] is False
-        assert understanding["needs_tools"] is False
-        assert understanding["needs_verification"] is False
+            events = _parse_sse_events(body)
+            assert "understanding_started" in events
+            assert "understanding_completed" in events
 
-        assert "plan_created" not in events
-        assert "tool_call" not in events
-        assert "verification_started" not in events
+            understanding = events["understanding_completed"][0]
+            assert understanding["intent"] == "conversation"
+            assert understanding["needs_plan"] is False
+            assert understanding["needs_tools"] is False
+            assert understanding["needs_verification"] is False
 
-        done = events["done"]
-        assert len(done) == 1
-        assert done[0]["state"] == "completed"
+            assert "plan_created" not in events
+            assert "tool_call" not in events
+            assert "verification_started" not in events
+
+            assert "final_response" in events
+            done = events["done"]
+            assert len(done) == 1
+            assert done[0]["state"] == "completed"
 
     async def test_thanks_no_plan(self, client: AsyncClient):
         h = await _setup_user(client, "reg_conv2@test.com", "reg_conv2")
         conv_id = await _create_conv(client, h, "thanks test")
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "thanks", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        events = _parse_sse_events(resp.text)
-        understanding = events["understanding_completed"][0]
-        assert understanding["intent"] == "conversation"
-        assert "plan_created" not in events
+
+        call_count = 0
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_understand_resp(
+                    intent="conversation", goal="thank user",
+                    needs_plan=False, needs_tools=False,
+                    needs_verification=False, confidence=1.0,
+                )
+            else:
+                r = MagicMock()
+                r.content = "You're welcome!"
+                return r
+
+        with patch("services.llm_client.OllamaClient.chat", side_effect=mock_chat):
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "thanks", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            assert resp.status_code == 200
+            events = _parse_sse_events(resp.text)
+            understanding = events["understanding_completed"][0]
+            assert understanding["intent"] == "conversation"
+            assert "plan_created" not in events
 
     async def test_bye_no_plan(self, client: AsyncClient):
         h = await _setup_user(client, "reg_conv3@test.com", "reg_conv3")
         conv_id = await _create_conv(client, h, "bye test")
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "bye", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        assert resp.status_code == 200
-        events = _parse_sse_events(resp.text)
-        understanding = events["understanding_completed"][0]
-        assert understanding["intent"] == "conversation"
+
+        call_count = 0
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_understand_resp(
+                    intent="conversation", goal="say goodbye",
+                    needs_plan=False, needs_tools=False,
+                    needs_verification=False, confidence=1.0,
+                )
+            else:
+                r = MagicMock()
+                r.content = "Goodbye!"
+                return r
+
+        with patch("services.llm_client.OllamaClient.chat", side_effect=mock_chat):
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "bye", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            assert resp.status_code == 200
+            events = _parse_sse_events(resp.text)
+            understanding = events["understanding_completed"][0]
+            assert understanding["intent"] == "conversation"
 
     async def test_conversation_never_creates_plan(self, client: AsyncClient):
         """Every simple greeting must bypass the planner entirely."""
         h = await _setup_user(client, "reg_conv4@test.com", "reg_conv4")
         conv_id = await _create_conv(client, h, "conv plan test")
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "hello there", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        events = _parse_sse_events(resp.text)
-        assert "plan_created" not in events
-        assert "todo_updated" not in events
+
+        call_count = 0
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_understand_resp(
+                    intent="conversation", goal="greet user",
+                    needs_plan=False, needs_tools=False,
+                    needs_verification=False, confidence=1.0,
+                )
+            else:
+                r = MagicMock()
+                r.content = "Hello there!"
+                return r
+
+        with patch("services.llm_client.OllamaClient.chat", side_effect=mock_chat):
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hello there", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            assert "plan_created" not in events
+            assert "todo_updated" not in events
 
 
 # ===================================================================
@@ -259,19 +327,36 @@ class TestKnowledgePath:
 @pytest.mark.asyncio
 class TestToolTaskPath:
     async def test_simple_request_bypasses_all(self, client: AsyncClient):
-        """hi -> CONVERSATION -> no tool, no plan, direct response."""
+        """hi -> CONVERSATION -> LLM response, no tool, no plan."""
         h = await _setup_user(client, "reg_tool1@test.com", "reg_tool1")
         conv_id = await _create_conv(client, h, "simple test")
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "hi", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        events = _parse_sse_events(resp.text)
-        understanding = events["understanding_completed"][0]
-        assert understanding["intent"] == "conversation"
-        assert "plan_created" not in events
-        assert "tool_call" not in events
+
+        call_count = 0
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_understand_resp(
+                    intent="conversation", goal="greet user",
+                    needs_plan=False, needs_tools=False,
+                    needs_verification=False, confidence=1.0,
+                )
+            else:
+                r = MagicMock()
+                r.content = "Hello!"
+                return r
+
+        with patch("services.llm_client.OllamaClient.chat", side_effect=mock_chat):
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hi", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            understanding = events["understanding_completed"][0]
+            assert understanding["intent"] == "conversation"
+            assert "plan_created" not in events
+            assert "tool_call" not in events
 
 
 # ===================================================================
@@ -597,18 +682,31 @@ class TestSSEStructure:
         """Conversation should have minimal SSE events."""
         h = await _setup_user(client, "reg_sse1@test.com", "reg_sse1")
         conv_id = await _create_conv(client, h, "sse minimal test")
-        resp = await client.post(
-            f"/api/v1/chat/conversations/{conv_id}/agent",
-            json={"content": "hello", "model_name": "llama3.2:3b"},
-            headers=h,
-        )
-        events = _parse_sse_events(resp.text)
-        expected_types = {
-            "agent_started", "agent_state", "understanding_started",
-            "understanding_completed", "token", "final_response", "done",
-        }
-        actual_types = set(events.keys())
-        assert actual_types == expected_types
+
+        with patch(
+            "services.llm_client.OllamaClient.chat",
+            new_callable=AsyncMock,
+        ) as mock_chat:
+            mock_chat.side_effect = [
+                _make_understand_resp(
+                    intent="conversation", goal="greet user",
+                    needs_plan=False, needs_tools=False,
+                    needs_verification=False, confidence=1.0,
+                ),
+                MagicMock(content="Hello! How can I help you today?"),
+            ]
+            resp = await client.post(
+                f"/api/v1/chat/conversations/{conv_id}/agent",
+                json={"content": "hello", "model_name": "llama3.2:3b"},
+                headers=h,
+            )
+            events = _parse_sse_events(resp.text)
+            expected_types = {
+                "agent_started", "agent_state", "understanding_started",
+                "understanding_completed", "token", "final_response", "done",
+            }
+            actual_types = set(events.keys())
+            assert actual_types == expected_types
 
     async def test_done_event_exactly_once(self, client: AsyncClient):
         """Every run must have exactly one done event."""
@@ -1387,8 +1485,8 @@ class TestNoneContentAgentRuntime:
             assert "TypeError" not in body
             assert "traceback" not in body.lower()
 
-    async def test_exception_path_never_emits_final_response(self, client: AsyncClient):
-        """On exception, final_response event must NOT be emitted."""
+    async def test_exception_path_emits_final_response_before_done(self, client: AsyncClient):
+        """On exception, final_response event MUST be emitted before done (change #2)."""
         h = await _setup_user(client, "none_u3@test.com", "none_u3")
         conv_id = await _create_conv(client, h, "no final on error")
 
@@ -1404,8 +1502,11 @@ class TestNoneContentAgentRuntime:
                 headers=h,
             )
             events = _parse_sse_events(resp.text)
-            assert "final_response" not in events
+            assert "final_response" in events
             assert "error" in events
+            done = events["done"]
+            assert len(done) >= 1
+            assert done[0]["state"] == "failed"
 
     async def test_agent_run_status_is_failed_on_real_exception(self, client: AsyncClient):
         """AgentRun.status must be 'failed' when a real exception occurs, never 'completed'."""
@@ -1702,6 +1803,7 @@ class TestReasonerRetry:
         from services.agent_state import AgentStateMachine
 
         runtime = AgentRuntime()
+        runtime._conversation_history = []
         agent = AgentStateMachine()
         agent.start("test goal")
 
@@ -1733,6 +1835,7 @@ class TestReasonerRetry:
         from services.agent_state import AgentStateMachine
 
         runtime = AgentRuntime()
+        runtime._conversation_history = []
         agent = AgentStateMachine()
         agent.start("test goal")
 

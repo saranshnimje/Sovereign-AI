@@ -6,6 +6,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -222,8 +223,9 @@ async def answer_user_question(
 ):
     """Answer a pending ASK_USER question to resume an agent run.
 
-    The agent run must be in 'awaiting_user' status.
-    The answer is persisted and the run is resumed.
+    Returns an SSE stream of the resumed agent execution, matching the
+    same event format as the initial agent run. This ensures the frontend
+    receives real-time updates without getting stuck on streaming=true.
     """
     result = await db.execute(select(AgentRun).where(AgentRun.id == run_id))
     run = result.scalar_one_or_none()
@@ -241,16 +243,18 @@ async def answer_user_question(
     run.pending_options_json = None
     await db.flush()
 
-    # Resume the agent run in background
-    import asyncio
-    from services.agent.runtime import AgentRuntime
+    from services.agent.runtime import AgentRuntime, _sse
     from dependencies import resolve_llm_for_role_async
+    from database import AsyncSessionLocal
+    from services.agent_state import AgentStateMachine
+    from models.conversation import Conversation, Message as Msg
+    from sqlalchemy.orm import selectinload
+    from tools.registry import get_registry
 
-    async def _resume_run():
-        """Resume the agent run with the user's answer injected as context."""
+    async def _resume_stream():
+        """Stream SSE events from the resumed agent run."""
+        full_content = ""
         try:
-            # Build fresh DB session for background task
-            from database import AsyncSessionLocal
             async with AsyncSessionLocal() as resume_db:
                 # Resolve LLM
                 llm = await resolve_llm_for_role_async(resume_db, "chat")
@@ -259,11 +263,11 @@ async def answer_user_question(
                 res = await resume_db.execute(select(AgentRun).where(AgentRun.id == run_id))
                 fresh_run = res.scalar_one_or_none()
                 if not fresh_run or fresh_run.status != "running":
+                    yield _sse("error", {"message": "Run is no longer active"})
+                    yield _sse("done", {"content": "", "state": "failed"})
                     return
 
                 # Get conversation history
-                from models.conversation import Conversation
-                from sqlalchemy.orm import selectinload
                 conv_res = await resume_db.execute(
                     select(Conversation)
                     .options(selectinload(Conversation.messages))
@@ -290,7 +294,6 @@ async def answer_user_question(
                 plan_meta = json.loads(run.plan_json or "{}")
                 allowed_tools = plan_meta.get("allowed_tools")
 
-                from tools.registry import get_registry
                 reg = get_registry()
                 available_tools = reg.list_enabled(user_role=current_user.role)
                 tool_names = [t.name for t in available_tools]
@@ -311,10 +314,8 @@ async def answer_user_question(
                     user_kb_ids = [row[0] for row in kb_res.all()]
 
                 runtime = AgentRuntime()
-                from services.agent_state import AgentStateMachine
                 agent = AgentStateMachine()
 
-                events = []
                 async for event_str in runtime.run(
                     goal=resumed_goal,
                     user_id=current_user.id,
@@ -331,19 +332,38 @@ async def answer_user_question(
                     user_kb_ids=user_kb_ids,
                     conversation_history=conversation_history,
                 ):
-                    events.append(event_str)
+                    # Extract final content from final_response event
+                    if event_str.startswith("event: final_response\n"):
+                        try:
+                            payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
+                            full_content = payload.get("content", "")
+                        except Exception:
+                            pass
+
+                    yield event_str
 
                 # Update run status
                 fresh_run.status = agent.state.value if agent.state.value in (
                     "completed", "failed", "cancelled"
                 ) else "completed"
-                fresh_run.result = "".join(events)[-10000:] if events else None
+                fresh_run.result = full_content[:10000] if full_content else None
                 await resume_db.commit()
 
         except Exception as exc:
             logger.exception("Failed to resume agent run %s: %s", run_id, exc)
+            yield _sse("error", {"message": f"Resume failed: {str(exc)[:200]}"})
+            yield _sse("done", {
+                "content": full_content,
+                "state": "failed",
+                "token_count": 0,
+                "activity": "",
+                "tool_calls": 0,
+                "elapsed_ms": 0,
+                "plan": [],
+                "observations": [],
+                "verification": None,
+            })
             try:
-                from database import AsyncSessionLocal
                 async with AsyncSessionLocal() as err_db:
                     res = await err_db.execute(select(AgentRun).where(AgentRun.id == run_id))
                     err_run = res.scalar_one_or_none()
@@ -354,11 +374,12 @@ async def answer_user_question(
             except Exception:
                 pass
 
-    # Start background task
-    asyncio.create_task(_resume_run())
-
-    return {
-        "detail": "Answer submitted, agent resuming",
-        "run_id": run_id,
-        "answer": data.answer,
-    }
+    return StreamingResponse(
+        _resume_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

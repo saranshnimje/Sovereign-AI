@@ -379,11 +379,17 @@ export default function ChatPage() {
     }
 
     // Helper to store an agent event in durable state
+    // Uses the server's run_id from the payload (for agent_started) to ensure
+    // events are keyed by the actual database run_id, not the client-generated one.
     const storeEvent = (eventType: string, payload: Record<string, unknown>) => {
       eventSequence++
+      // Use server's run_id from agent_started event to align client/server IDs
+      const serverRunId = (eventType === 'agent_started' && payload.run_id)
+        ? String(payload.run_id)
+        : runId
       const evt = {
-        id: `evt-${runId}-${eventSequence}`,
-        run_id: runId,
+        id: `evt-${serverRunId}-${eventSequence}`,
+        run_id: serverRunId,
         sequence: eventSequence,
         event_type: eventType,
         payload,
@@ -561,6 +567,11 @@ export default function ChatPage() {
             storeEvent('final_response', d)
           } else if (ev === 'agent_started') {
             storeEvent('agent_started', d)
+            // Capture the server's run_id and update the stream to align client/server IDs.
+            // This ensures all subsequent events use the same run_id as the DB.
+            if (d.run_id && d.run_id !== runId) {
+              updateStream(convId, { runId: d.run_id })
+            }
           } else if (ev === 'subagent_spawned') {
             const stream = getStream(convId)
             if (stream) {
@@ -1242,13 +1253,24 @@ export default function ChatPage() {
             <MessageBubble key={m.id} msg={m} />
           ))}
 
-          {/* Durable agent timeline — persists after streaming ends */}
-          {convId && agentEvents[convId]?.length > 0 && (
-            <AgentTimeline
-              events={agentEvents[convId]}
-              isStreaming={isStreaming}
-            />
-          )}
+          {/* Durable agent timeline — filtered by current run_id for isolation */}
+          {convId && agentEvents[convId]?.length > 0 && (() => {
+            // Filter events to only show the current run's events.
+            // During streaming, use the active stream's runId (may be client-generated initially,
+            // updated to server run_id after agent_started). After streaming, show the most recent run.
+            const activeRunId = activeStream?.runId
+            const allEvents = agentEvents[convId]
+            const filteredEvents = activeRunId
+              ? allEvents.filter(e => e.run_id === activeRunId)
+              : allEvents // Fallback: show all if no active stream (page refresh)
+            if (filteredEvents.length === 0) return null
+            return (
+              <AgentTimeline
+                events={filteredEvents}
+                isStreaming={isStreaming}
+              />
+            )
+          })()}
 
           {toolCalls.length > 0 && isStreaming && (
             <ToolCallCard calls={toolCalls} />

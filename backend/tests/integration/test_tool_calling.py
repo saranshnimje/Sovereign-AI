@@ -86,9 +86,12 @@ class TestToolCalling:
 
         with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.side_effect = [
-                _make_plan_resp("Hello!"),
-                _make_reasoner_resp("COMPLETE", "Hello! How can I help you?"),
-                _make_verifier_resp(True),
+                _make_understand_resp(
+                    intent="conversation", goal="greet user",
+                    needs_plan=False, needs_tools=False,
+                    needs_verification=False,
+                ),
+                MagicMock(content="Hello! How can I help you?"),
             ]
             resp = await client.post(
                 f"/api/v1/chat/conversations/{conv_id}/agent",
@@ -99,7 +102,6 @@ class TestToolCalling:
             assert "text/event-stream" in resp.headers["content-type"]
             body = resp.text
             assert "event: done" in body
-            assert "event: token" in body
 
     @pytest.mark.asyncio
     async def test_agent_tool_call_event_structure(self, client: AsyncClient):

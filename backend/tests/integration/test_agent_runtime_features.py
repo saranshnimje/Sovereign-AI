@@ -103,11 +103,25 @@ async def _create_conv(client: AsyncClient, h: dict, title: str = "test") -> str
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_simple_greeting_no_tools(client: AsyncClient):
-    """Greeting like 'hii' matches regex, no LLM call, no tools."""
+    """Greeting like 'hii' goes through LLM for response, no tools used."""
     h = await _setup_user(client, "greet@test.com", "greet")
     conv_id = await _create_conv(client, h, "greeting test")
 
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
+    # Mock the LLM to return a valid understanding JSON and a conversational response
+    call_count = 0
+    async def mock_chat_fn(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        msgs = kwargs.get("messages", [])
+        content = msgs[-1].content if msgs else ""
+        if call_count == 1:
+            # Understanding stage: classify as CONVERSATION
+            return type("Resp", (), {"content": '{"intent": "conversation", "goal": "greet user", "needs_plan": false, "needs_tools": false, "needs_verification": false, "confidence": 1.0, "reasoning": "greeting"}'})()
+        else:
+            # Conversation response stage
+            return type("Resp", (), {"content": "Hello! How can I help you today?"})()
+
+    with patch("services.llm_client.OllamaClient.chat", side_effect=mock_chat_fn):
         resp = await client.post(
             f"/api/v1/chat/conversations/{conv_id}/agent",
             json={"content": "hii", "model_name": "llama3.2:3b"},
@@ -115,9 +129,6 @@ async def test_simple_greeting_no_tools(client: AsyncClient):
         )
         assert resp.status_code == 200
         body = resp.text
-
-        # No LLM calls for simple greeting
-        assert not mock_chat.called
 
         # No tool_call events
         assert "event: tool_call\n" not in body
@@ -131,8 +142,12 @@ async def test_simple_greeting_no_tools(client: AsyncClient):
         # No plan_created
         assert "event: plan_created\n" not in body
 
-        # Done event present
+        # Final response and done events present
+        assert "event: final_response\n" in body
         assert "event: done\n" in body
+
+        # Response comes from LLM, not hardcoded
+        assert "Hello! How can I help you today?" in body
 
 
 # ------------------------------------------------------------------
@@ -140,11 +155,20 @@ async def test_simple_greeting_no_tools(client: AsyncClient):
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_simple_thanks_no_tools(client: AsyncClient):
-    """'Thanks!' is classified as simple request and handled without tools."""
+    """'Thanks!' is classified as simple request, goes through LLM, no tools used."""
     h = await _setup_user(client, "thanks@test.com", "thanks")
     conv_id = await _create_conv(client, h, "thanks test")
 
-    with patch("services.llm_client.OllamaClient.chat", new_callable=AsyncMock) as mock_chat:
+    call_count = 0
+    async def mock_chat_fn(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return type("Resp", (), {"content": '{"intent": "conversation", "goal": "thank user", "needs_plan": false, "needs_tools": false, "needs_verification": false, "confidence": 1.0, "reasoning": "thanks"}'})()
+        else:
+            return type("Resp", (), {"content": "You are welcome!"})()
+
+    with patch("services.llm_client.OllamaClient.chat", side_effect=mock_chat_fn):
         resp = await client.post(
             f"/api/v1/chat/conversations/{conv_id}/agent",
             json={"content": "Thanks!", "model_name": "llama3.2:3b"},
@@ -152,11 +176,11 @@ async def test_simple_thanks_no_tools(client: AsyncClient):
         )
         assert resp.status_code == 200
         body = resp.text
-        assert not mock_chat.called
         assert "event: tool_call\n" not in body
         assert "event: understanding_started\n" in body
         assert "event: understanding_completed\n" in body
         assert "event: agent_state\n" in body
+        assert "event: final_response\n" in body
         assert "event: done\n" in body
 
 

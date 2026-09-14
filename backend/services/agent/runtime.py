@@ -312,19 +312,7 @@ class AgentRuntime:
         """
         stripped = goal.strip()
 
-        # --- Deterministic fast path for obvious greetings ---
-        if self._is_simple_request(stripped):
-            return UnderstandingResult(
-                intent=RequestIntent.CONVERSATION,
-                goal=f"Respond naturally to: {stripped}",
-                needs_plan=False,
-                needs_tools=False,
-                needs_verification=False,
-                confidence=1.0,
-                reasoning="Simple greeting/small talk detected by pattern match",
-            )
-
-        # --- LLM-based understanding for everything else ---
+        # --- LLM-based understanding for everything ---
         system = UNDERSTAND_SYSTEM
 
         # Build user message with conversation context
@@ -454,25 +442,34 @@ class AgentRuntime:
     # Intent-specific handlers
     # ------------------------------------------------------------------
 
-    def _generate_conversation_response(self, goal: str) -> str:
-        """Generate a direct response for conversational requests.
+    async def _generate_conversation_response(
+        self, *, llm: Any, model: str, goal: str,
+    ) -> str:
+        """Generate a conversational response via the configured LLM.
 
-        Uses conversation history for context-aware responses.
+        Never fabricates responses in Python — always delegates to the
+        configured provider so the selected model is actually invoked.
         """
-        stripped = goal.strip().lower()
-        # Deterministic responses for common greetings
-        if any(w in stripped for w in ["hi", "hello", "hey", "howdy", "greetings"]):
-            return "Hello! How can I help you today?"
-        if any(w in stripped for w in ["thanks", "thank you", "thx", "ty"]):
-            return "You're welcome! Let me know if you need anything else."
-        if any(w in stripped for w in ["bye", "goodbye", "see you", "later"]):
-            return "Goodbye! Feel free to come back anytime."
-        if any(w in stripped for w in ["how are you", "how are things"]):
-            return "I'm doing well, thanks for asking! How can I assist you?"
-        if any(w in stripped for w in ["good morning", "good afternoon", "good evening"]):
-            return f"{goal.strip().split()[0].title()}! How can I help you?"
-        # Generic conversational response
-        return "I understand. How can I help you?"
+        messages: list[ChatMessage] = [
+            ChatMessage(role="system", content=SIMPLE_REQUEST_SYSTEM),
+            ChatMessage(role="user", content=SIMPLE_REQUEST_USER.format(goal=goal)),
+        ]
+        try:
+            resp = await asyncio.wait_for(
+                llm.chat(
+                    model=model,
+                    messages=messages,
+                    stream=False,
+                    temperature=0.7,
+                    max_tokens=256,
+                ),
+                timeout=30.0,
+            )
+            return (resp.content or "") if hasattr(resp, "content") else str(resp)
+        except Exception as exc:
+            logger.warning("Conversation response LLM failed: %s", exc)
+            # Absolute fallback — still not hardcoded content
+            return f"I'm here to help. You said: {goal[:200]}"
 
     async def _generate_knowledge_response(
         self, *, llm: Any, model: str, goal: str,
@@ -599,6 +596,8 @@ class AgentRuntime:
         tool_results_context: list[str],
         start_time: float, _action_fingerprints: dict[str, int],
         _result: list[str],
+        run_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
         """Run the main agent loop for TASK intent. Yields SSE events."""
         final_content = ""
@@ -611,11 +610,16 @@ class AgentRuntime:
                     f"Wall-clock timeout exceeded ({elapsed:.0f}s > {AGENT_MAX_RUNTIME_SECONDS}s)"
                 )
                 yield _sse("agent_state", agent.to_dict())
-                yield _sse("error", {
-                    "message": f"Wall-clock timeout: {AGENT_MAX_RUNTIME_SECONDS}s exceeded"
+                error_msg = f"Wall-clock timeout: {AGENT_MAX_RUNTIME_SECONDS}s exceeded"
+                yield _sse("error", {"message": error_msg})
+                yield _sse("final_response", {
+                    "content": error_msg,
+                    "token_count": 0,
+                    "state": "timed_out",
+                    "elapsed_ms": agent.get_elapsed_ms(),
                 })
                 yield _sse("done", {
-                    "content": final_content,
+                    "content": error_msg,
                     "token_count": 0,
                     "activity": agent.activity,
                     "tool_calls": agent.tool_call_count,
@@ -628,7 +632,7 @@ class AgentRuntime:
                     "observations": [],
                     "verification": None,
                 })
-                _result[0] = final_content
+                _result[0] = error_msg
                 return
 
             # Check if already in terminal state
@@ -641,8 +645,14 @@ class AgentRuntime:
                 agent.fail(limit_error)
                 yield _sse("agent_state", agent.to_dict())
                 yield _sse("error", {"message": limit_error})
+                yield _sse("final_response", {
+                    "content": limit_error,
+                    "token_count": 0,
+                    "state": agent.state.value,
+                    "elapsed_ms": agent.get_elapsed_ms(),
+                })
                 yield _sse("done", {
-                    "content": final_content,
+                    "content": limit_error,
                     "token_count": 0,
                     "activity": agent.activity,
                     "tool_calls": agent.tool_call_count,
@@ -655,7 +665,7 @@ class AgentRuntime:
                     "observations": [],
                     "verification": None,
                 })
-                _result[0] = final_content
+                _result[0] = limit_error
                 return
 
             # --- REASON: Decide what to do next ---
@@ -757,10 +767,17 @@ class AgentRuntime:
                 case "CONTINUE" | "RETRY":
                     if decision.next_action is None:
                         agent.fail("Reasoner returned CONTINUE/RETRY without next_action")
+                        no_action_msg = "No action provided by reasoner"
                         yield _sse("agent_state", agent.to_dict())
-                        yield _sse("error", {"message": "No action provided"})
+                        yield _sse("error", {"message": no_action_msg})
+                        yield _sse("final_response", {
+                            "content": no_action_msg,
+                            "token_count": 0,
+                            "state": agent.state.value,
+                            "elapsed_ms": agent.get_elapsed_ms(),
+                        })
                         yield _sse("done", {
-                            "content": final_content,
+                            "content": no_action_msg,
                             "token_count": 0,
                             "activity": agent.activity,
                             "tool_calls": agent.tool_call_count,
@@ -838,10 +855,17 @@ class AgentRuntime:
                                 f"Loop detected: {action.tool} repeated "
                                 f"{_action_fingerprints[fp]} times, no alternative plan"
                             )
+                            loop_msg = "Loop detected, cannot recover"
                             yield _sse("agent_state", agent.to_dict())
-                            yield _sse("error", {"message": "Loop detected, cannot recover"})
+                            yield _sse("error", {"message": loop_msg})
+                            yield _sse("final_response", {
+                                "content": loop_msg,
+                                "token_count": 0,
+                                "state": agent.state.value,
+                                "elapsed_ms": agent.get_elapsed_ms(),
+                            })
                             yield _sse("done", {
-                                "content": final_content,
+                                "content": loop_msg,
                                 "token_count": 0,
                                 "activity": agent.activity,
                                 "tool_calls": agent.tool_call_count,
@@ -854,7 +878,7 @@ class AgentRuntime:
                                 "observations": [],
                                 "verification": None,
                             })
-                            _result[0] = final_content
+                            _result[0] = loop_msg
                             return
                         continue
 
@@ -1111,8 +1135,14 @@ class AgentRuntime:
                     agent.fail(decision.reason)
                     yield _sse("agent_state", agent.to_dict())
                     yield _sse("error", {"message": decision.reason})
+                    yield _sse("final_response", {
+                        "content": decision.reason,
+                        "token_count": 0,
+                        "state": agent.state.value,
+                        "elapsed_ms": agent.get_elapsed_ms(),
+                    })
                     yield _sse("done", {
-                        "content": final_content,
+                        "content": decision.reason,
                         "token_count": 0,
                         "activity": agent.activity,
                         "tool_calls": agent.tool_call_count,
@@ -1125,7 +1155,7 @@ class AgentRuntime:
                         "observations": [],
                         "verification": None,
                     })
-                    _result[0] = final_content
+                    _result[0] = decision.reason
                     return
 
         else:
@@ -1135,6 +1165,12 @@ class AgentRuntime:
             agent.fail("Max iterations reached")
             yield _sse("agent_state", agent.to_dict())
             yield _sse("error", {"message": "Max iterations reached"})
+            yield _sse("final_response", {
+                "content": final_content,
+                "token_count": 0,
+                "state": agent.state.value,
+                "elapsed_ms": agent.get_elapsed_ms(),
+            })
             yield _sse("done", {
                 "content": final_content,
                 "token_count": 0,
@@ -1283,8 +1319,10 @@ class AgentRuntime:
                 # CONVERSATION: greetings, small talk, farewells
                 # --------------------------------------------------------
                 case RequestIntent.CONVERSATION:
-                    # Direct response — no tools, no plan, no verification
-                    final_content = self._generate_conversation_response(goal)
+                    # Route through LLM — never fabricate in Python
+                    final_content = await self._generate_conversation_response(
+                        llm=llm, model=model, goal=goal,
+                    )
                     agent.complete()
                     yield _sse("agent_state", agent.to_dict())
                     # Fall through to finalize
@@ -1403,6 +1441,8 @@ class AgentRuntime:
                             start_time=start_time,
                             _action_fingerprints=_action_fingerprints,
                             _result=_result,
+                            run_id=run_id,
+                            conversation_id=conversation_id,
                         ):
                             yield event
                         final_content = _result[0]
@@ -1412,8 +1452,15 @@ class AgentRuntime:
                 agent.cancel()
             yield _sse("agent_state", agent.to_dict())
             yield _sse("cancelled", {"message": "Cancelled"})
+            cancel_msg = "Run was cancelled"
+            yield _sse("final_response", {
+                "content": cancel_msg,
+                "token_count": 0,
+                "state": agent.state.value,
+                "elapsed_ms": agent.get_elapsed_ms(),
+            })
             yield _sse("done", {
-                "content": final_content,
+                "content": cancel_msg,
                 "token_count": 0,
                 "activity": agent.activity,
                 "tool_calls": agent.tool_call_count,
@@ -1423,15 +1470,23 @@ class AgentRuntime:
                 "observations": [],
                 "verification": None,
             })
+            self._cleanup_workspace(getattr(self, "_workspace_path", ""))
             return
         except Exception as exc:
             logger.exception("Agent runtime error: %s", exc)
             if agent.state not in (AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED):
                 agent.fail(str(exc)[:200])
+            error_msg = f"Agent error: {str(exc)[:200]}"
             yield _sse("agent_state", agent.to_dict())
-            yield _sse("error", {"message": f"Agent error: {str(exc)[:200]}"})
+            yield _sse("error", {"message": error_msg})
+            yield _sse("final_response", {
+                "content": error_msg,
+                "token_count": 0,
+                "state": agent.state.value,
+                "elapsed_ms": agent.get_elapsed_ms(),
+            })
             yield _sse("done", {
-                "content": final_content,
+                "content": error_msg,
                 "token_count": 0,
                 "activity": agent.activity,
                 "tool_calls": agent.tool_call_count,
@@ -1441,6 +1496,7 @@ class AgentRuntime:
                 "observations": [],
                 "verification": None,
             })
+            self._cleanup_workspace(getattr(self, "_workspace_path", ""))
             return
 
         # === FINALIZE ===
@@ -1449,7 +1505,30 @@ class AgentRuntime:
         # (exception handler, FAIL case, timeout handler, etc.).
         # Only emit final_response + done for successful completions.
         if agent.state.value in ("failed", "cancelled"):
+            # Cleanup workspace
+            self._cleanup_workspace(getattr(self, "_workspace_path", ""))
             return
+
+        # CRITICAL: Persist assistant message to DB BEFORE yielding final_response.
+        # This ensures the response survives SSE connection drops.
+        if final_content and self._db and conversation_id:
+            try:
+                from models.conversation import Message as _Msg
+                assistant_msg = _Msg(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=final_content,
+                    metadata_json=_json.dumps({
+                        "agent": True,
+                        "state": agent.state.value,
+                        "tool_calls": agent.tool_call_count,
+                        "run_id": run_id,
+                    }),
+                )
+                self._db.add(assistant_msg)
+                await self._db.flush()
+            except Exception:
+                logger.warning("Failed to persist assistant message in runtime", exc_info=True)
 
         # Stream final answer as tokens
         for i in range(0, len(final_content), 4):
@@ -1788,15 +1867,6 @@ class AgentRuntime:
         data = parse_llm_json(text)
         if data.get("type") == "error":
             logger.warning("Verifier raw output (unparseable): %s", text[:500])
-            # If no tools were used and no observations, assume simple task is done
-            obs_list = observations or []
-            if not obs_list and not tool_results_context:
-                return VerificationResult(
-                    verified=True,
-                    confidence=0.7,
-                    criteria=[],
-                    missing=[],
-                )
             return VerificationResult(
                 verified=False,
                 confidence=0.0,
@@ -1807,14 +1877,6 @@ class AgentRuntime:
             result = VerificationResult.model_validate(data)
         except Exception:
             logger.warning("Verifier invalid schema: %s", data)
-            obs_list = observations or []
-            if not obs_list and not tool_results_context:
-                return VerificationResult(
-                    verified=True,
-                    confidence=0.7,
-                    criteria=[],
-                    missing=[],
-                )
             return VerificationResult(
                 verified=False,
                 confidence=0.0,
