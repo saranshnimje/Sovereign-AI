@@ -15,9 +15,9 @@ services:
       - key: QDRANT_API_KEY
         sync: false
       - key: FRONTEND_ORIGIN
-        value: https://sovereign-ai-igkz.vercel.app
+        value: https://sovereign-ai-workbench-2026.vercel.app
       - key: FRONTEND_ORIGINS
-        value: https://sovereign-ai-igkz.vercel.app
+        value: https://sovereign-ai-workbench-2026.vercel.app
       - key: OLLAMA_URL
         sync: false
       - key: DATA_DIR
