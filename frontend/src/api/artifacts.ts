@@ -1,10 +1,7 @@
 /**
  * Artifacts API — manage agent-generated files.
  */
-
-// Keep the production API usable even if Vercel is missing the optional env var.
-// VITE_API_BASE_URL still overrides this for local/staging environments.
-const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'https://sovereign-ai-backend-ciy8.onrender.com').replace(/\/$/, '')
+import api from './client'
 
 export interface Artifact {
   id: string
@@ -18,57 +15,44 @@ export interface Artifact {
   created_at: string | null
 }
 
-function authHeaders(): HeadersInit {
-  const token = localStorage.getItem('access_token')
-  return token ? { Authorization: `Bearer ${token}` } : {}
+function normalizeError(error: unknown): Error {
+  if (error instanceof Error) return error
+  return new Error('Artifact request failed')
 }
 
 export const artifactsApi = {
   async listArtifacts(conversationId?: string, runId?: string): Promise<Artifact[]> {
-    const params = new URLSearchParams()
-    if (conversationId) params.set('conversation_id', conversationId)
-    if (runId) params.set('run_id', runId)
-    const qs = params.toString()
-    const res = await fetch(`${API_BASE}/api/v1/artifacts${qs ? '?' + qs : ''}`, {
-      headers: authHeaders(),
-    })
-    if (!res.ok) throw res
-    return res.json()
+    try {
+      const response = await api.get<Artifact[]>('/artifacts', {
+        params: {
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+          ...(runId ? { run_id: runId } : {}),
+        },
+      })
+      return Array.isArray(response.data) ? response.data : []
+    } catch (error) {
+      throw normalizeError(error)
+    }
   },
 
   async getArtifact(artifactId: string): Promise<Artifact> {
-    const res = await fetch(`${API_BASE}/api/v1/artifacts/${artifactId}`, {
-      headers: authHeaders(),
-    })
-    if (!res.ok) throw res
-    return res.json()
+    const response = await api.get<Artifact>(`/artifacts/${artifactId}`)
+    return response.data
   },
 
   async downloadUrl(artifactId: string): Promise<string> {
-    const res = await fetch(`${API_BASE}/api/v1/artifacts/${artifactId}/download`, {
-      headers: authHeaders(),
+    const response = await api.get<Blob>(`/artifacts/${artifactId}/download`, {
+      responseType: 'blob',
     })
-    if (!res.ok) throw res
-
-    // Downloads are authenticated by the Authorization header. Returning a
-    // blob URL avoids leaking access tokens into browser URLs/history/logs.
-    const blob = await res.blob()
-    return URL.createObjectURL(blob)
+    return URL.createObjectURL(response.data)
   },
 
   async previewArtifact(artifactId: string): Promise<{ content: string; filename: string; mime_type: string }> {
-    const res = await fetch(`${API_BASE}/api/v1/artifacts/${artifactId}/preview`, {
-      headers: authHeaders(),
-    })
-    if (!res.ok) throw res
-    return res.json()
+    const response = await api.get(`/artifacts/${artifactId}/preview`)
+    return response.data
   },
 
   async deleteArtifact(artifactId: string): Promise<void> {
-    const res = await fetch(`${API_BASE}/api/v1/artifacts/${artifactId}`, {
-      method: 'DELETE',
-      headers: authHeaders(),
-    })
-    if (!res.ok) throw res
+    await api.delete(`/artifacts/${artifactId}`)
   },
 }
