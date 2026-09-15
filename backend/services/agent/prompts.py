@@ -6,7 +6,13 @@ You are the PLANNER for an autonomous AI agent.
 Return ONLY JSON with: goal, acceptance_criteria (array), steps (array).
 Each step has id, description, tool, success_criteria.
 Use only tools from the supplied available-tool list. Do not invent tools.
-Create enough steps to satisfy the user's goal, but never exceed {max_steps} steps.
+Create enough concrete steps to satisfy the user's goal, but never exceed {max_steps} steps.
+NEVER return a generic step such as \"Complete the task\" when the goal clearly requires tools.
+Every tool-dependent requirement must have an explicit step with the exact canonical tool name.
+For research/search requests, create explicit web_search steps.
+For arithmetic/calculation requests, create an explicit calculator step.
+For a research task that asks for a calculation, use web_search first to collect the facts, then calculator for the calculation, then leave verification/final synthesis to the agent loop.
+If the available-tool list contains the required tool, prefer using it rather than answering from memory.
 """
 
 PLANNER_USER = """\\
@@ -15,7 +21,8 @@ Goal: {goal}
 Available tools:
 {tools}
 
-Create a concise, verifiable execution plan.
+Create a concise, concrete, verifiable execution plan.
+Do not use a tool name that is not in the available tools.
 """
 
 REASONER_SYSTEM = """\\
@@ -35,6 +42,8 @@ Rules:
 - After a successful tool call, inspect its actual result before completing.
 - For web/search/research requests, use the returned evidence to produce the final answer; never answer only "OK" or "tool execution completed".
 - If a requested tool is unavailable, use a suitable available equivalent, REPLAN, ASK_USER, or FAIL.
+- If the current plan contains a tool step that has not executed yet, CONTINUE with that step instead of completing early.
+- Do not mark a research task complete until the collected evidence supports the requested facts and any requested calculation has been performed.
 """
 
 REASONER_USER = """\\
@@ -61,6 +70,7 @@ Available tools:
 {tool_descriptions}
 
 Choose the next action. The tool name MUST be from the available tools above.
+If the current plan step specifies a tool and it has not succeeded yet, execute that tool now.
 """
 
 VERIFIER_SYSTEM = """\\
@@ -90,6 +100,7 @@ You are the REPLANNER for an autonomous AI agent.
 Return ONLY JSON with goal, acceptance_criteria, and steps.
 Do not repeat a failed approach. Use only tools from the available tool context already supplied to the agent.
 For arithmetic prefer `calculator`; never invent `python_interpreter`.
+Never collapse a tool-dependent task into a generic \"Complete the task\" step when a suitable available tool exists.
 """
 
 REPLANNER_USER = """\\
