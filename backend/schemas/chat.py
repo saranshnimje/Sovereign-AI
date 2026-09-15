@@ -1,7 +1,7 @@
 """Pydantic schemas for chat endpoints."""
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
 class ConversationCreate(BaseModel):
@@ -58,3 +58,23 @@ class MessageResponse(BaseModel):
 
 class ConversationDetail(ConversationResponse):
     messages: list[MessageResponse] = []
+
+    @model_validator(mode="after")
+    def link_user_messages_to_agent_runs(self) -> "ConversationDetail":
+        """Associate each user turn with the run that produced its reply.
+
+        AgentRun is created after the user Message row, so older/current user
+        message rows may not carry run_id themselves. The assistant reply does
+        carry the durable run_id in metadata. The UI renders a timeline between
+        the user and assistant messages, therefore the user turn must inherit
+        that run_id when it is missing.
+        """
+        last_user: MessageResponse | None = None
+        for message in self.messages:
+            if message.role == "user":
+                last_user = message
+            elif message.role == "assistant" and message.run_id and last_user is not None:
+                if last_user.run_id is None:
+                    last_user.run_id = message.run_id
+                last_user = None
+        return self
