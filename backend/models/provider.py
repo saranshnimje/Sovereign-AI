@@ -38,29 +38,13 @@ PROVIDER_bedrock            = "bedrock"
 PROVIDER_OLLAMA_COMPATIBLE  = "ollama_compatible"
 
 PROVIDER_TYPES = [
-    PROVIDER_OLLAMA,
-    PROVIDER_OLLAMA_DOCKER,
-    PROVIDER_OPENAI,
-    PROVIDER_ANTHROPIC,
-    PROVIDER_GEMINI,
-    PROVIDER_OPENAI_COMPATIBLE,
-    PROVIDER_OPENROUTER,
-    PROVIDER_OPENCODE_ZEN,
-    PROVIDER_NVIDIA,
-    PROVIDER_GROQ,
-    PROVIDER_TOGETHER,
-    PROVIDER_DEEPSEEK,
-    PROVIDER_MISTRAL,
-    PROVIDER_COHERE,
-    PROVIDER_PERPLEXITY,
-    PROVIDER_FIREWORKS,
-    PROVIDER_AI21,
-    PROVIDER_CLOUDFLARE,
-    PROVIDER_AZURE_OPENAI,
-    PROVIDER_HUGGINGFACE,
-    PROVIDER_REPLICATE,
-    PROVIDER_bedrock,
-    PROVIDER_OLLAMA_COMPATIBLE,
+    PROVIDER_OLLAMA, PROVIDER_OLLAMA_DOCKER, PROVIDER_OPENAI,
+    PROVIDER_ANTHROPIC, PROVIDER_GEMINI, PROVIDER_OPENAI_COMPATIBLE,
+    PROVIDER_OPENROUTER, PROVIDER_OPENCODE_ZEN, PROVIDER_NVIDIA,
+    PROVIDER_GROQ, PROVIDER_TOGETHER, PROVIDER_DEEPSEEK, PROVIDER_MISTRAL,
+    PROVIDER_COHERE, PROVIDER_PERPLEXITY, PROVIDER_FIREWORKS, PROVIDER_AI21,
+    PROVIDER_CLOUDFLARE, PROVIDER_AZURE_OPENAI, PROVIDER_HUGGINGFACE,
+    PROVIDER_REPLICATE, PROVIDER_bedrock, PROVIDER_OLLAMA_COMPATIBLE,
 ]
 
 PROVIDER_ENVIRONMENTS = ["local", "cloud", "custom"]
@@ -137,7 +121,7 @@ PROVIDER_PRESETS: list[dict] = [
         "requires_api_key": True,
         "api_key_hint": "AIza…",
         "api_key_url": "https://aistudio.google.com/apikey",
-        "supports_discovery": False,
+        "supports_discovery": True,
         "adapter": "GeminiProvider",
     },
     {
@@ -379,22 +363,14 @@ class LLMProvider(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     provider_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    # local | cloud | custom
     environment: Mapped[str] = mapped_column(String(20), nullable=False, default="local")
-    # Base URL — required for Ollama and OpenAI-compatible; optional for cloud providers
     base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # Model name as the provider expects it (e.g. "qwen3:14b", "gpt-4o", "claude-3-5-sonnet-20241022")
     model_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    # API key — NEVER expose through API; masked in all responses
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Whether this provider is available for selection
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    # Capabilities
     supports_streaming: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_embeddings: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # Optional description shown in UI
     description: Mapped[str | None] = mapped_column(String(300), nullable=True)
-    # Custom headers as JSON string — e.g. {"X-Title": "MyApp", "HTTP-Referer": "https://my.app"}
     custom_headers: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     def __repr__(self) -> str:
