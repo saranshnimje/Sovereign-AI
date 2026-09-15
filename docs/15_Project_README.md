@@ -1,254 +1,344 @@
-# 15 README
-## Sovereign AI Workbench
+# Sovereign AI Workbench v2.0
 
-**Version:** 1.0
-**Classification:** Internal - SIH 2026 Prototype
+**Production-ready AI workbench with agentic execution, multi-provider LLM routing, RAG, human-in-the-loop approvals, persistent per-message agent timelines, and cloud/local deployment modes.**
 
----
+## Download
 
-# Sovereign AI Workbench
+### Git clone
 
-**AI capabilities without giving your data away.**
+```bash
+git clone https://github.com/saranshnimje/Sovereign-AI.git
+cd Sovereign-AI
+```
 
-Sovereign AI Workbench is a privacy-first, on-premise AI platform for organizations that need to use modern AI without sending sensitive data to external cloud services. Everything runs locally — models, documents, embeddings, and AI reasoning all stay within your infrastructure.
+### GitHub ZIP
 
----
+1. Open https://github.com/saranshnimje/Sovereign-AI
+2. Click **Code** → **Download ZIP**.
+3. Extract the ZIP archive.
+4. Open a terminal in the extracted `Sovereign-AI` directory.
 
-## What It Does
+Git clone is recommended for development because it makes future updates easy. ZIP download is suitable when Git is not installed.
 
-| Capability | Description |
-|-----------|-------------|
-| 💬 **Local AI Chat** | Chat with locally running LLMs via Ollama. Streaming responses. No cloud. |
-| 📄 **Document Processing** | Upload PDFs, DOCX, images, CSVs. OCR for scanned documents. |
-| 🧠 **Knowledge Base RAG** | Index documents into a local vector database. Ask questions, get answers with source citations. |
-| 🤖 **AI Agents** | Agents that plan, select tools, execute tasks, and synthesize results. |
-| 🔧 **Controlled Tools** | File operations, Python execution, knowledge base search — all with permission levels. |
-| 🐳 **Docker Sandbox** | Untrusted code runs in isolated containers with CPU/memory/network limits. |
-| ✅ **Human Approval** | High-risk operations (file deletion, system modification) require explicit admin approval. |
-| 📋 **Audit Logging** | Tamper-evident, hash-chained log of all AI actions, tool calls, and approvals. |
-| 🔒 **RBAC** | Role-based access control (Admin / Analyst / Viewer) on all endpoints. |
+## Production
 
----
+| Component | Production |
+|---|---|
+| Frontend | https://sovereign-ai-workbench-2026.vercel.app/ |
+| Backend | https://sovereign-ai-backend-ciy8.onrender.com |
+| Database | Neon PostgreSQL |
+| Vector DB | Qdrant Cloud |
+| LLM | Configured cloud providers with failover |
 
-## Quick Start
+## Docker installation
 
 ### Prerequisites
 
-- [Docker Desktop 24+](https://www.docker.com/products/docker-desktop/) or Docker Engine + Compose v2
-- [Ollama](https://ollama.ai) installed and running on the host
-- 8 GB RAM minimum (16 GB recommended)
-- 50 GB free disk space
+- Docker Desktop 24+ on Windows/macOS, or Docker Engine + Compose v2 on Linux
+- 8 GB RAM minimum; 16 GB recommended for local LLM workloads
+- 20 GB+ free disk space, plus model storage if using Ollama
 
-### 1. Pull Required Models (one-time, requires internet)
+### Setup
+
+Download/clone the repository, then configure the environment:
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Set a strong `SECRET_KEY` and configure provider/database/Qdrant settings as needed. Do not commit `.env`.
+
+Start the application:
+
+```bash
+docker compose up --build -d
+```
+
+For hot-reload development:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+Health check:
+
+```bash
+curl http://localhost/api/v1/system/health
+```
+
+Open:
+
+```text
+http://localhost
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+Do not use `docker compose down -v` unless you intentionally want to remove Docker-managed persistent volumes and their data.
+
+## Non-Docker installation
+
+Non-Docker mode runs the FastAPI backend and React/Vite frontend directly on the host.
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+ (Node 20 LTS recommended)
+- npm
+- Qdrant local service or Qdrant Cloud
+- Ollama only if local/self-hosted LLM inference is desired
+
+### Backend
+
+Windows PowerShell:
+
+```powershell
+cd backend
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Linux/macOS:
+
+```bash
+cd backend
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Backend health endpoint:
+
+```text
+http://localhost:8000/api/v1/system/health
+```
+
+### Frontend
+
+In a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Vite normally serves at:
+
+```text
+http://localhost:5173
+```
+
+Configure `VITE_API_URL` to point to the local backend, for example:
+
+```text
+VITE_API_URL=http://localhost:8000
+```
+
+Production frontend build:
+
+```bash
+npm run build
+npm run preview
+```
+
+### Tests
+
+Backend:
+
+```bash
+cd backend
+pytest tests/ -v
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm run build
+npm run lint
+```
+
+## Local Ollama
+
+Ollama is optional and intended for local/self-hosted development. It is not a silent production fallback.
+
+Install Ollama from https://ollama.com/ and pull models such as:
 
 ```bash
 ollama pull llama3.2:3b
 ollama pull nomic-embed-text
 ```
 
-### 2. Clone and Set Up
+When using Docker Desktop, the backend can normally reach host Ollama through `http://host.docker.internal:11434`. Configure `OLLAMA_URL` if your environment uses another endpoint.
 
-```bash
-git clone <repo-url>
-cd sovereign-ai-workbench
-bash scripts/setup.sh
+For production, configure cloud LLM providers instead of relying on local Ollama.
+
+## Architecture
+
+```text
+                         ┌─────────────────────┐
+                         │     User Browser     │
+                         └──────────┬──────────┘
+                                    │
+                         ┌──────────▼──────────┐
+                         │ React/Vite Frontend │
+                         └──────────┬──────────┘
+                                    │ REST + SSE
+                         ┌──────────▼──────────┐
+                         │    FastAPI Backend  │
+                         └───┬──────┬──────┬───┘
+                             │      │      │
+                           DB     Qdrant   LLM providers
+                         Neon/     Cloud    / Ollama local
+                         SQLite
 ```
 
-This will:
-- Generate a `.env` file with a random `SECRET_KEY`
-- Pull the Docker sandbox base image
-- Verify Ollama is reachable
+Production uses Vercel → Render → Neon + Qdrant Cloud + configured cloud LLM providers. Local Docker development can use SQLite, Docker Qdrant, and Ollama.
 
-### 3. Start the Stack
+## Agent runtime
 
-```bash
-docker compose up --build -d
+`UNDERSTAND → ROUTE → PLAN → REASON → EXECUTE → OBSERVE → VERIFY`
+
+Each user message gets its own server-generated `run_id` and its own Agent Timeline. A conversation can therefore contain:
+
+```text
+User: hii
+  Agent Timeline
+    Agent started
+    Response ready
+    Completed
+  Assistant response
+
+User: who are you
+  Agent Timeline
+    Agent started
+    Response ready
+    Completed
+  Assistant response
 ```
 
-Wait ~60 seconds for all services to start. Check health:
+Timeline events are isolated by `run_id`. Assistant messages are persisted once, and the lifecycle guarantees `final_response` before `done` on terminal paths.
 
-```bash
-curl http://localhost/api/v1/system/health
-# {"status": "ok"}
-```
+## LLM routing and failover
 
-### 4. Open in Browser
+- Simple requests and greetings are routed through the configured LLM.
+- Provider health tracking and failover are supported.
+- OpenAI-compatible 429/5xx streaming failures are handled explicitly.
+- Production does not silently fall back to local Ollama when cloud providers are unavailable.
+- Ollama remains available for local/self-hosted development.
 
-Navigate to **http://localhost**
+## RAG / Knowledge Base
 
-The first time you run the system, a setup wizard will guide you through creating the admin account and configuring the default models.
-
----
-
-## Architecture Overview
-
-```
-Browser
-  └── React Frontend (nginx)
-        └── FastAPI Backend
-              ├── SQLite (local volume)
-              ├── Qdrant (vector database, local container)
-              ├── Ollama (LLM inference, runs on host)
-              └── Docker Engine (sandbox containers)
-```
-
-All components run locally. No data leaves your machine during AI processing.
-
----
-
-## Technology Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Frontend | React 18, Vite, Tailwind CSS |
-| Backend | Python 3.11, FastAPI, Pydantic v2 |
-| Database | SQLite (via SQLAlchemy async) |
-| Vector DB | Qdrant |
-| LLM Inference | Ollama |
-| OCR | PaddleOCR |
-| Sandbox | Docker SDK |
-| Auth | JWT (HS256), bcrypt |
-| Deployment | Docker Compose |
-
----
-
-## Project Structure
-
-```
-sovereign-ai-workbench/
-├── backend/           FastAPI application
-├── frontend/          React application
-├── scripts/           Setup, backup, model pull utilities
-├── docs/              Full documentation (15 documents)
-│   ├── 01_PRD.md
-│   ├── 02_TRD.md
-│   ├── 03_System_Architecture.md
-│   ├── 04_App_User_Flow.md
-│   ├── 05_UI_UX_Specification.md
-│   ├── 06_Backend_Database_API.md
-│   ├── 07_AI_ML_Design.md
-│   ├── 08_Security_Privacy.md
-│   ├── 09_Implementation_Plan.md
-│   ├── 10_Testing_QA_Plan.md
-│   ├── 11_Deployment_DevOps.md
-│   ├── 12_Risk_Mitigation.md
-│   ├── 13_Requirements_Traceability.md
-│   ├── 14_User_Guide.md
-│   └── 15_README.md
-├── docker-compose.yml
-├── docker-compose.dev.yml
-└── .env.example
-```
-
----
-
-## Environment Variables
-
-Copy `.env.example` to `.env` and set:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SECRET_KEY` | **Yes** | JWT signing secret (min 32 chars). Generate: `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `OLLAMA_URL` | No | Ollama endpoint. Default: `http://host.docker.internal:11434` |
-| `MAX_UPLOAD_SIZE_MB` | No | Max file upload. Default: `50` |
-| `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING`. Default: `INFO` |
-
-See `.env.example` for the full list.
-
----
-
-## Development
-
-```bash
-# Hot-reload dev mode
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-
-# API docs available at
-open http://localhost:8000/api/docs
-
-# Run backend tests
-cd backend && pytest tests/ -v
-
-# Run static security analysis
-bandit -r backend/ -ll
-```
-
----
-
-## Recommended Models
-
-| Role | Model | RAM | Command |
-|------|-------|-----|---------|
-| Chat (minimum) | `llama3.2:3b` | ~3 GB | `ollama pull llama3.2:3b` |
-| Chat (better) | `mistral:7b-q4` | ~5 GB | `ollama pull mistral:7b-q4` |
-| Embedding | `nomic-embed-text` | ~0.5 GB | `ollama pull nomic-embed-text` |
-| Vision (optional) | `llava:7b-q4` | ~5 GB | `ollama pull llava:7b-q4` |
-
----
+- Document ingestion and chunking
+- Embeddings and similarity search
+- Qdrant-backed knowledge bases
+- Production Qdrant Cloud support
+- Local Docker Qdrant support
+- Source/citation retrieval
 
 ## Security
 
-- All AI processing is on-premise — no cloud API calls for core functionality
-- JWT authentication with refresh token rotation
-- Role-based access control (Admin / Analyst / Viewer)
-- Docker sandbox with dropped capabilities, no network, non-root user
-- Tamper-evident audit log with SHA-256 hash chain
-- All tool calls validated by Pydantic before execution
-- High-risk operations require explicit human approval
-- See [docs/08_Security_Privacy.md](08_Security_Privacy.md) for the full security model
+- JWT authentication and refresh-token rotation
+- RBAC for protected resources and tools
+- Central tool registry with risk/permission checks
+- Human approval for high-risk operations
+- Docker sandboxing for untrusted code
+- SSRF and path-traversal protections
+- Pydantic validation
+- Persistent audit logging
 
----
+## Environment variables
+
+Copy `.env.example` to `.env` and configure values for your environment.
+
+| Variable | Purpose |
+|---|---|
+| `SECRET_KEY` | JWT signing secret |
+| `DATABASE_URL` | Application database connection |
+| `QDRANT_URL` | Qdrant endpoint |
+| `QDRANT_API_KEY` | Qdrant Cloud API key when required |
+| `OLLAMA_URL` | Local Ollama endpoint |
+| `VITE_API_URL` | Frontend API base URL for non-Docker development |
+| `MAX_UPLOAD_SIZE_MB` | Maximum upload size |
+| `LOG_LEVEL` | Application logging level |
+
+Never commit API keys, passwords, JWT secrets, or `.env` files.
+
+## Technology stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS, Zustand |
+| Backend | Python 3.11, FastAPI, Pydantic, Uvicorn |
+| Database | Neon PostgreSQL production; SQLite local |
+| Vector DB | Qdrant Cloud production; Qdrant Docker/local development |
+| LLM | Cloud/OpenAI-compatible providers; Ollama local |
+| Streaming | Server-Sent Events (SSE) |
+| Containers | Docker / Docker Compose |
+| Testing | pytest + pytest-asyncio + TypeScript/Vite checks |
+
+## Project structure
+
+```text
+Sovereign-AI/
+├── backend/              FastAPI backend
+├── frontend/             React/Vite frontend
+├── docs/                 Project documentation
+├── scripts/              Utility/setup scripts
+├── docker-compose.yml
+├── docker-compose.dev.yml
+├── .env.example
+└── README.md
+```
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [01 PRD](01_PRD.md) | Product requirements, user stories, acceptance criteria |
-| [02 TRD](02_TRD.md) | Technical requirements, API specs, data models |
-| [03 System Architecture](03_System_Architecture.md) | Component diagrams, data flows, service design |
-| [04 App/User Flow](04_App_User_Flow.md) | User journeys and state transitions |
-| [05 UI/UX Specification](05_UI_UX_Specification.md) | Design system, component library, accessibility |
-| [06 Backend/Database/API](06_Backend_Database_API.md) | Full API reference, ORM models, service patterns |
-| [07 AI/ML Design](07_AI_ML_Design.md) | LLM integration, RAG pipeline, agent architecture |
-| [08 Security & Privacy](08_Security_Privacy.md) | Threat model, security controls, privacy design |
-| [09 Implementation Plan](09_Implementation_Plan.md) | Phased delivery plan, task breakdown |
-| [10 Testing & QA](10_Testing_QA_Plan.md) | Unit tests, integration tests, acceptance criteria |
-| [11 Deployment & DevOps](11_Deployment_DevOps.md) | Docker Compose, Dockerfiles, backup, troubleshooting |
-| [12 Risk & Mitigation](12_Risk_Mitigation.md) | Risk register, contingency plans |
-| [13 Requirements Traceability](13_Requirements_Traceability.md) | Requirements → implementation → test mapping |
-| [14 User Guide](14_User_Guide.md) | End-user documentation |
-| [15 README](15_README.md) | This document |
+- `README.md` — current project overview, architecture, installation and release information
+- `docs/01_PRD.md` — product requirements
+- `docs/02_TRD.md` — technical requirements
+- `docs/03_System_Architecture.md` — system architecture
+- `docs/04_App_User_Flow.md` — user flows
+- `docs/05_UI_UX_Specification.md` — UI/UX specification
+- `docs/06_Backend_Database_API.md` — backend/database/API documentation
+- `docs/07_AI_ML_Design.md` — AI/ML design
+- `docs/08_Security_Privacy.md` — security and privacy
+- `docs/09_Implementation_Plan.md` — implementation plan
+- `docs/10_Testing_QA_Plan.md` — testing and QA
+- `docs/11_Deployment_DevOps.md` — deployment and DevOps
+- `docs/12_Risk_Mitigation.md` — risk mitigation
+- `docs/13_Requirements_Traceability.md` — requirements traceability
+- `docs/14_User_Guide.md` — user guide
+- `docs/15_Project_README.md` — this project README
 
----
+## Current verification
 
-## Troubleshooting
+The latest application fix is commit `fc1a854` on `main`.
 
-| Problem | Solution |
-|---------|----------|
-| Ollama not reachable | Ensure Ollama is running: `ollama serve` |
-| Backend won't start | Check `.env` has `SECRET_KEY` set |
-| Models not listed | Check `OLLAMA_URL` in `.env`; test with `curl http://localhost:11434/api/tags` |
-| Docker sandbox fails | Ensure Docker socket is accessible; check Docker is running |
-| Slow LLM responses | CPU inference is slow; first request loads model (~10-30s) |
-| Port conflicts | Change ports in `docker-compose.yml` |
+- 787 backend tests passed in the latest repository verification.
+- Frontend TypeScript compilation and Vite build passed.
+- Production frontend canonical URL: `https://sovereign-ai-workbench-2026.vercel.app/`.
+- Production backend: `https://sovereign-ai-backend-ciy8.onrender.com`.
+- Neon production schema is present and ready.
+- Production Qdrant configuration uses Qdrant Cloud.
+- Cloud LLM routing/failover is configured; no silent production Ollama fallback.
 
-Full troubleshooting guide: [docs/11_Deployment_DevOps.md](11_Deployment_DevOps.md)
-
----
-
-## Future Scope
-
-These features are architecturally planned but out of scope for the SIH prototype:
-
-- PostgreSQL migration (swap `DATABASE_URL` env var)
-- Multi-agent orchestration
-- Kubernetes deployment
-- Model fine-tuning pipeline
-- Federated knowledge bases
-- LDAP/SAML user authentication
-- Plugin marketplace for custom tools
-
----
+Historical duplicate assistant-message records created before `fc1a854` may remain in the database. The current code prevents new duplicate persistence; historical data is not automatically deleted.
 
 ## License
 
@@ -256,10 +346,4 @@ Internal project — SIH 2026 Prototype. All rights reserved by the developing t
 
 ---
 
-## Contact
-
-For deployment support or questions, contact the system administrator.
-
----
-
-*Sovereign AI Workbench — Privacy-first AI for organizations that need control.*
+*Sovereign AI Workbench — privacy-first AI with control over deployment, data and model providers.*
