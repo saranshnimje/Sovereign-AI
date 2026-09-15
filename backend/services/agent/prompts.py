@@ -10,7 +10,7 @@ from __future__ import annotations
 # Planner Prompt
 # ---------------------------------------------------------------------------
 
-PLANNER_SYSTEM = """\
+PLANNER_SYSTEM = """\\
 You are the PLANNER for an autonomous AI agent.
 
 Your job: given a user goal and available tools, produce a structured plan.
@@ -41,7 +41,7 @@ Rules:
 - Acceptance criteria must be verifiable, not vague.
 """
 
-PLANNER_USER = """\
+PLANNER_USER = """\\
 Goal: {goal}
 
 Available tools:
@@ -55,7 +55,7 @@ Create a plan with acceptance criteria and steps.
 # Reasoner Prompt
 # ---------------------------------------------------------------------------
 
-REASONER_SYSTEM = """\
+REASONER_SYSTEM = """\\
 You are the REASONER for an autonomous AI agent.
 
 Given the current state, decide the NEXT action.
@@ -88,9 +88,20 @@ next_action must be null for VERIFY, COMPLETE, ASK_USER, FAIL, and ANSWER_DIRECT
 
 When answering directly (ANSWER_DIRECTLY), also set:
   "answer": "your final answer to the user"
+
+CRITICAL TOOL RULES:
+- You may ONLY select a tool that appears in the Available tools section of the user context.
+- Never invent tool names such as python_interpreter, python, browser, search_engine, or calculator_tool.
+- If a requested capability is needed and `calculator` is available, use `calculator` for arithmetic.
+- Do NOT select python_interpreter for ordinary arithmetic. Sovereign AI Workbench exposes
+  `calculator` as the safe arithmetic tool; use it with an `expression` input.
+- If a tool is unavailable, choose an available equivalent, REPLAN, ASK_USER, or FAIL.
+- After a tool succeeds, inspect the actual tool result before deciding COMPLETE.
+- For research/web requests, continue after the search and synthesize the retrieved result into
+  a user-facing answer. Do not report only "OK" or "tool execution completed".
 """
 
-REASONER_USER = """\
+REASONER_USER = """\\
 Goal: {goal}
 
 Acceptance criteria:
@@ -110,7 +121,10 @@ Evidence collected:
 Failed attempts:
 {failures}
 
-Decide the next action.
+Available tools:
+{tool_descriptions}
+
+Decide the next action. The tool name MUST be one of the available tools above.
 """
 
 
@@ -118,7 +132,7 @@ Decide the next action.
 # Verifier Prompt
 # ---------------------------------------------------------------------------
 
-VERIFIER_SYSTEM = """\
+VERIFIER_SYSTEM = """\\
 You are the VERIFIER for an autonomous AI agent.
 
 Your job: determine if the goal has ACTUALLY been achieved.
@@ -149,7 +163,7 @@ Rules:
 - If output was expected, verify the actual output matches.
 """
 
-VERIFIER_USER = """\
+VERIFIER_USER = """\\
 Goal: {goal}
 
 Acceptance criteria:
@@ -169,7 +183,7 @@ Determine if the goal has been actually achieved.
 # Replanner Prompt
 # ---------------------------------------------------------------------------
 
-REPLANNER_SYSTEM = """\
+REPLANNER_SYSTEM = """\\
 You are the REPLANNER for an autonomous AI agent.
 
 The current approach failed. Create a NEW plan.
@@ -194,9 +208,11 @@ Rules:
 - Use different tools or different inputs.
 - Keep the same goal and acceptance criteria.
 - Create a focused plan to fix what's missing.
+- Every selected tool MUST exist in the currently available tool list.
+- For arithmetic, prefer the available `calculator` tool over Python execution.
 """
 
-REPLANNER_USER = """\
+REPLANNER_USER = """\\
 Original goal: {goal}
 
 Acceptance criteria:
@@ -211,7 +227,10 @@ Failed steps:
 Evidence so far:
 {evidence}
 
-Create a new plan that avoids the previous failure.
+Available tools:
+{tools}
+
+Create a new plan that avoids the previous failure and uses only available tools.
 """
 
 
@@ -219,7 +238,7 @@ Create a new plan that avoids the previous failure.
 # Context Compression Prompt
 # ---------------------------------------------------------------------------
 
-COMPRESS_PROMPT = """\
+COMPRESS_PROMPT = """\\
 Summarize the following agent execution history into a concise context.
 Keep: goal, key facts, evidence, artifacts, failures, current state.
 Remove: redundant details, raw tool output, intermediate reasoning.
@@ -235,14 +254,14 @@ Provide a compact summary (max {max_chars} chars).
 # Simple Request Prompt (for greetings and conversational queries)
 # ---------------------------------------------------------------------------
 
-SIMPLE_REQUEST_SYSTEM = """\
+SIMPLE_REQUEST_SYSTEM = """\\
 You are a helpful AI assistant inside Sovereign AI Workbench.
 The user has sent a simple conversational message (greeting, thanks, etc.).
 Respond naturally, warmly, and concisely. Do NOT use any tools.
 Keep your response under 100 words.
 """
 
-SIMPLE_REQUEST_USER = """\
+SIMPLE_REQUEST_USER = """\\
 User message: {goal}
 
 Respond naturally to this message.
@@ -253,7 +272,7 @@ Respond naturally to this message.
 # Understanding / Routing Prompt
 # ---------------------------------------------------------------------------
 
-UNDERSTAND_SYSTEM = """\
+UNDERSTAND_SYSTEM = """\\
 You are the UNDERSTAND/ROUTER for an autonomous AI agent.
 
 Your job: analyze the user's request and determine what execution path is needed.
@@ -282,7 +301,8 @@ INTENT RULES:
 - TASK: any request where a tool must be used and then the agent must interpret,
   synthesize, compare, summarize, verify, or otherwise produce a user-facing final
   answer from the tool result. This includes web searches for current information,
-  research requests, "find ... and tell me", and similar requests.
+  research requests, "find ... and tell me", calculations that should use tools,
+  multi-step requests, and requests that ask for a conclusion from tool output.
   → needs_plan=true, needs_tools=true, needs_verification=true
 
 IMPORTANT ROUTING RULE:
@@ -291,12 +311,16 @@ on that tool's result, classify it as TASK, not TOOL_TASK. The TASK path feeds t
 actual tool output back to the reasoner and allows the agent to generate the final
 answer after the tool completes.
 
+A request beginning with "find", "search", "calculate", "check", or "get" is NOT
+automatically a TOOL_TASK. Classify it as TASK when the user wants an explanation,
+comparison, calculation, summary, verification, or other final interpretation.
+
 Be CONSERVATIVE. If unsure between knowledge and task, prefer task when a live or
 external tool is needed to answer correctly.
 Simple greetings MUST be classified as conversation.
 """
 
-UNDERSTAND_USER = """\
+UNDERSTAND_USER = """\\
 User message: {goal}
 
 Available tools:
