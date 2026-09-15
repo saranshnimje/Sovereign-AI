@@ -275,12 +275,24 @@ INTENT RULES:
   → needs_plan=false, needs_tools=false, needs_verification=false
 - ANALYSIS: compare, summarize, analyze content that's already available
   → needs_plan=false, needs_tools=true/false, needs_verification=false
-- TOOL_TASK: explicit request to use a tool (read file, search, run command)
+- TOOL_TASK: explicit request to use a tool for a standalone operation where the
+  tool output itself is the requested result (for example, read a file and return
+  its contents, run a command and report its output).
   → needs_plan=false, needs_tools=true, needs_verification=true
-- TASK: complex multi-step work (build something, fix code, create report)
+- TASK: any request where a tool must be used and then the agent must interpret,
+  synthesize, compare, summarize, verify, or otherwise produce a user-facing final
+  answer from the tool result. This includes web searches for current information,
+  research requests, "find ... and tell me", and similar requests.
   → needs_plan=true, needs_tools=true, needs_verification=true
 
-Be CONSERVATIVE. If unsure between knowledge and task, prefer knowledge.
+IMPORTANT ROUTING RULE:
+If the user asks you to use a tool AND expects a natural-language final answer based
+on that tool's result, classify it as TASK, not TOOL_TASK. The TASK path feeds the
+actual tool output back to the reasoner and allows the agent to generate the final
+answer after the tool completes.
+
+Be CONSERVATIVE. If unsure between knowledge and task, prefer task when a live or
+external tool is needed to answer correctly.
 Simple greetings MUST be classified as conversation.
 """
 
