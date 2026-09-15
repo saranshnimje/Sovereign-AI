@@ -544,33 +544,16 @@ async def send_agent_message(
                 user_kb_ids=user_kb_ids,
                 conversation_history=conversation_history,
             ):
-                # On final_response: persist assistant message BEFORE yielding
-                # This ensures DONE => final response already exists in DB
+                # On final_response: extract content for done-event fallback only.
+                # Assistant message is already persisted by the runtime's finalize
+                # section (runtime.py:1514-1531) using the same DB session.
+                # Persisting again here would create a duplicate row.
                 if event_str.startswith("event: final_response\n"):
                     try:
                         payload = json.loads(event_str.split("data: ", 1)[1].split("\n\n", 1)[0])
                         full_content = payload.get("content", "")
                     except Exception:
                         pass
-
-                    if full_content:
-                        try:
-                            assistant_msg = Msg(
-                                conversation_id=conv_id,
-                                role="assistant",
-                                content=full_content,
-                                metadata_json=json.dumps({
-                                    "local": True, "agent": True,
-                                    "state": agent.state.value,
-                                    "tool_calls": agent.tool_call_count,
-                                    "run_id": run_id,
-                                })
-                            )
-                            session.add(assistant_msg)
-                            await session.flush()
-                            await session.commit()
-                        except Exception:
-                            logger.warning("Failed to persist assistant message", exc_info=True)
 
                 # Yield event to frontend
                 yield event_str

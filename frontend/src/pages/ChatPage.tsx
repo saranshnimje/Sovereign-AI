@@ -98,6 +98,7 @@ export default function ChatPage() {
     conversations, setConversations, updateConversation, addConversation, removeConversation,
     activeStreams, startStream, updateStream, endStream, getStream,
     agentEvents, addAgentEvent, setAgentEvents,
+    agentEventsByRunId, addAgentEvent: addRunEvent, setAgentEventsForRun,
   } = useChatStore()
 
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
@@ -263,11 +264,12 @@ export default function ChatPage() {
           detailRef.current = d
           setLoadingDetail(false)
 
-          // Load persisted agent events for this conversation
+          // Load persisted agent events for this conversation, distributed by run_id
           chatApi.getAgentEvents(convId)
             .then(({ events }) => {
               if (latestFetchId.current !== convId) return
               if (events.length > 0) {
+                // Set the legacy flat events (for backward compat)
                 setAgentEvents(convId, events.map(e => ({
                   id: e.id,
                   run_id: e.run_id,
@@ -276,6 +278,23 @@ export default function ChatPage() {
                   payload: e.payload,
                   created_at: e.created_at,
                 })))
+                // Also populate per-run events for timeline isolation
+                const byRun: Record<string, typeof events> = {}
+                for (const e of events) {
+                  const rid = e.run_id
+                  if (!byRun[rid]) byRun[rid] = []
+                  byRun[rid].push({
+                    id: e.id,
+                    run_id: e.run_id,
+                    sequence: e.sequence,
+                    event_type: e.event_type,
+                    payload: e.payload,
+                    created_at: e.created_at,
+                  })
+                }
+                for (const [rid, evts] of Object.entries(byRun)) {
+                  setAgentEventsForRun(rid, evts)
+                }
               }
             })
             .catch(() => {}) // Non-fatal
@@ -378,15 +397,16 @@ export default function ChatPage() {
       return stream?.runId === runId && stream?.streaming === true
     }
 
-    // Helper to store an agent event in durable state
-    // Uses the server's run_id from the payload (for agent_started) to ensure
-    // events are keyed by the actual database run_id, not the client-generated one.
+    // Helper to store an agent event in durable state keyed by run_id.
+    // Uses the server's run_id from the payload (for agent_started) to align
+    // client/server IDs. All subsequent events use this server run_id.
+    let serverRunId = runId // Will be updated to server's run_id on agent_started
     const storeEvent = (eventType: string, payload: Record<string, unknown>) => {
       eventSequence++
       // Use server's run_id from agent_started event to align client/server IDs
-      const serverRunId = (eventType === 'agent_started' && payload.run_id)
-        ? String(payload.run_id)
-        : runId
+      if (eventType === 'agent_started' && payload.run_id) {
+        serverRunId = String(payload.run_id)
+      }
       const evt = {
         id: `evt-${serverRunId}-${eventSequence}`,
         run_id: serverRunId,
@@ -395,7 +415,8 @@ export default function ChatPage() {
         payload,
         created_at: new Date().toISOString(),
       }
-      addAgentEvent(convId, evt)
+      // Store by run_id for per-message timeline isolation
+      addRunEvent(serverRunId, evt)
     }
 
     while (true) {
@@ -571,6 +592,7 @@ export default function ChatPage() {
             // This ensures all subsequent events use the same run_id as the DB.
             if (d.run_id && d.run_id !== runId) {
               updateStream(convId, { runId: d.run_id })
+              serverRunId = d.run_id // Update local reference too
             }
           } else if (ev === 'subagent_spawned') {
             const stream = getStream(convId)
@@ -601,26 +623,11 @@ export default function ChatPage() {
             storeEvent('done', d)
             if (!doneProcessed) {
               doneProcessed = true
-              // CRITICAL: Commit streamed content to detail.messages BEFORE clearing streaming.
-              // This prevents the "response disappears" gap where StreamingBubble unmounts
-              // but detail.messages doesn't have the assistant message yet.
-              // React 18 batches setDetail + updateStream in the same render cycle,
-              // so there is never a state where the response exists in neither source.
-              if (acc) {
-                const assistantMsg = {
-                  id: 'done-'+Date.now()+'-'+runId,
-                  role: 'assistant' as const,
-                  content: acc,
-                  token_count: null,
-                  finish_reason: null,
-                  created_at: new Date().toISOString(),
-                }
-                setDetail(prev => prev ? {
-                  ...prev,
-                  messages: [...prev.messages, assistantMsg],
-                  message_count: prev.messages.length + 1,
-                } : prev)
-              }
+              // Do NOT create an optimistic assistant message here.
+              // The backend already persisted it via the runtime's finalize section.
+              // The post-stream fetch will retrieve it from the server.
+              // Creating an optimistic message here would cause duplicates when
+              // the post-fetch returns the server-persisted message.
               updateStream(convId, {
                 streaming: false,
                 agentState: d.state || null,
@@ -650,6 +657,8 @@ export default function ChatPage() {
           const updated = await chatApi.getConversation(convId)
           const hasAssistant = updated.messages.some(m => m.role === 'assistant')
           if (hasAssistant) {
+            // Merge: replace optimistic messages with server-persisted ones.
+            // Server messages are authoritative — use them directly.
             setDetail(updated)
             detailRef.current = updated
             updateConversation(convId, { title: updated.title, message_count: updated.messages.length })
@@ -660,15 +669,13 @@ export default function ChatPage() {
             await new Promise(r => setTimeout(r, 300 * (attempt + 1)))
           } else {
             // Last attempt — only use server data if it has an assistant message.
-            // If not, keep current detail (which already has the committed assistant content
-            // from the done event handler above). Never overwrite with stale server data.
+            // If not, keep current detail state.
             const currentDetail = useChatStore.getState().activeStreams[convId]
             const detailHasAssistant = detailRef.current?.messages.some(m => m.role === 'assistant')
             if (hasAssistant || !detailHasAssistant) {
               setDetail(updated)
               detailRef.current = updated
             }
-            // If detail already has assistant and server doesn't, preserve the committed content
           }
         } catch {
           // Network error — keep current detail state
@@ -1250,24 +1257,37 @@ export default function ChatPage() {
           )}
 
           {detail?.messages.map((m) => (
-            <MessageBubble key={m.id} msg={m} />
+            <div key={m.id}>
+              <MessageBubble msg={m} />
+              {/* Per-message agent timeline: show timeline for the user message's run_id */}
+              {m.role === 'user' && m.run_id && (() => {
+                const events = agentEventsByRunId[m.run_id]
+                if (!events || events.length === 0) return null
+                // Check if there's an active stream for this run
+                const isRunStreaming = activeStream?.runId === m.run_id && isStreaming
+                return (
+                  <AgentTimeline
+                    events={events}
+                    isStreaming={isRunStreaming}
+                  />
+                )
+              })()}
+            </div>
           ))}
 
-          {/* Durable agent timeline — filtered by current run_id for isolation */}
-          {convId && agentEvents[convId]?.length > 0 && (() => {
-            // Filter events to only show the current run's events.
-            // During streaming, use the active stream's runId (may be client-generated initially,
-            // updated to server run_id after agent_started). After streaming, show the most recent run.
-            const activeRunId = activeStream?.runId
-            const allEvents = agentEvents[convId]
-            const filteredEvents = activeRunId
-              ? allEvents.filter(e => e.run_id === activeRunId)
-              : allEvents // Fallback: show all if no active stream (page refresh)
-            if (filteredEvents.length === 0) return null
+          {/* Streaming timeline: show during active streaming even if user message
+              doesn't have run_id yet (before server persists it) */}
+          {isStreaming && activeStream?.runId && (() => {
+            const events = agentEventsByRunId[activeStream.runId]
+            if (!events || events.length === 0) return null
+            // Only show if no user message already has this run_id
+            // (meaning the message-level timeline hasn't rendered it yet)
+            const alreadyShown = detail?.messages.some(m => m.run_id === activeStream.runId)
+            if (alreadyShown) return null
             return (
               <AgentTimeline
-                events={filteredEvents}
-                isStreaming={isStreaming}
+                events={events}
+                isStreaming={true}
               />
             )
           })()}

@@ -65,9 +65,12 @@ interface ChatState {
   endStream: (convId: string) => void
   getStream: (convId: string) => ActiveStream | undefined
 
-  // Durable agent events per conversation — persists after streaming ends
+  // Durable agent events per run_id — isolated per message/run
+  agentEventsByRunId: Record<string, AgentEvent[]>
+  addAgentEvent: (runId: string, event: AgentEvent) => void
+  setAgentEventsForRun: (runId: string, events: AgentEvent[]) => void
+  // Legacy: flat events by convId (for backward compat during migration)
   agentEvents: Record<string, AgentEvent[]>
-  addAgentEvent: (convId: string, event: AgentEvent) => void
   setAgentEvents: (convId: string, events: AgentEvent[]) => void
   clearAgentEvents: (convId: string) => void
 }
@@ -134,42 +137,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
   getStream: (convId) => get().activeStreams[convId],
 
-  // Durable agent events — survives streaming end and browser refresh
-  agentEvents: {},
-  addAgentEvent: (convId, event) =>
+  // Durable agent events keyed by run_id — each run has its own timeline
+  agentEventsByRunId: {},
+  addAgentEvent: (runId, event) =>
     set((s) => {
-      const existing = s.agentEvents[convId] || []
-      // TASK 4: Deduplicate by (run_id, sequence) not by id.
-      // Live events use id="evt-{runId}-{seq}", persisted events use DB UUIDs.
-      // Using (run_id, sequence) ensures they collapse correctly.
+      const existing = s.agentEventsByRunId[runId] || []
+      // Deduplicate by (run_id, sequence)
       if (existing.some(e => e.run_id === event.run_id && e.sequence === event.sequence)) return s
       return {
-        agentEvents: {
-          ...s.agentEvents,
-          [convId]: [...existing, event].sort((a, b) => a.sequence - b.sequence),
+        agentEventsByRunId: {
+          ...s.agentEventsByRunId,
+          [runId]: [...existing, event].sort((a, b) => a.sequence - b.sequence),
         },
       }
     }),
-  setAgentEvents: (convId, events) =>
+  setAgentEventsForRun: (runId, events) =>
     set((s) => {
-      // TASK 4: Merge persisted events with existing live events instead of
-      // replacing. Live events (from SSE) may have different ids than persisted
-      // events (from DB), so we merge by (run_id, sequence) key.
-      const existing = s.agentEvents[convId] || []
+      const existing = s.agentEventsByRunId[runId] || []
       if (existing.length === 0) {
         return {
-          agentEvents: {
-            ...s.agentEvents,
-            [convId]: events.sort((a, b) => a.sequence - b.sequence),
+          agentEventsByRunId: {
+            ...s.agentEventsByRunId,
+            [runId]: events.sort((a, b) => a.sequence - b.sequence),
           },
         }
       }
-      // Build a map of existing events keyed by (run_id, sequence)
       const merged = new Map<string, typeof events[0]>()
       for (const e of existing) {
         merged.set(`${e.run_id}::${e.sequence}`, e)
       }
-      // Persisted events fill gaps but don't overwrite live events
       for (const e of events) {
         const key = `${e.run_id}::${e.sequence}`
         if (!merged.has(key)) {
@@ -177,10 +173,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
       return {
+        agentEventsByRunId: {
+          ...s.agentEventsByRunId,
+          [runId]: Array.from(merged.values()).sort((a, b) => a.sequence - b.sequence),
+        },
+      }
+    }),
+
+  // Legacy flat events by convId — kept for backward compat and migration
+  agentEvents: {},
+  setAgentEvents: (convId, events) =>
+    set((s) => {
+      // Migrate: also populate agentEventsByRunId from these events
+      const newByRunId = { ...s.agentEventsByRunId }
+      for (const e of events) {
+        const existing = newByRunId[e.run_id] || []
+        if (!existing.some(ev => ev.run_id === e.run_id && ev.sequence === e.sequence)) {
+          newByRunId[e.run_id] = [...existing, e].sort((a, b) => a.sequence - b.sequence)
+        }
+      }
+      return {
         agentEvents: {
           ...s.agentEvents,
-          [convId]: Array.from(merged.values()).sort((a, b) => a.sequence - b.sequence),
+          [convId]: events.sort((a, b) => a.sequence - b.sequence),
         },
+        agentEventsByRunId: newByRunId,
       }
     }),
   clearAgentEvents: (convId) =>

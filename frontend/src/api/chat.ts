@@ -23,11 +23,12 @@ export interface CitationSource {
 export interface MessageResponse {
   id: string; role: string; content: string
   token_count: number | null; finish_reason: string | null
-  created_at: string; metadata?: {
+  created_at: string; run_id?: string | null; metadata?: {
     local?: boolean
     model?: string
     agent?: { activity?: { tool: string; status: string; ms?: number }[] }
     evidence?: { sources: CitationSource[]; source_count: number }
+    run_id?: string
   }
 }
 

@@ -51,6 +51,7 @@ class MessageResponse(BaseModel):
     finish_reason: str | None
     created_at: datetime
     metadata: dict | None = None
+    run_id: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -354,9 +354,11 @@ class ChatService:
         return None
     def _map_message(self, m: Message) -> MessageResponse:
         meta: dict | None = None
+        run_id: str | None = None
         if m.metadata_json:
             try:
                 meta = json.loads(m.metadata_json)
+                run_id = meta.get("run_id")
             except Exception:
                 pass
         return MessageResponse(
@@ -367,6 +369,7 @@ class ChatService:
             finish_reason=m.finish_reason,
             created_at=m.created_at,
             metadata=meta,
+            run_id=run_id,
         )
 
 
