@@ -36,8 +36,6 @@ async def lifespan(app: FastAPI):
     for sub in ["sqlite", "uploads", "sandbox_workspace"]:
         (data_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    # Run startup migration fixup BEFORE init_db() to add any columns
-    # that were added by Alembic migrations but never applied to the DB.
     from database import engine as _engine, _is_postgres
     from migration_runner import run_startup_migrations
     await run_startup_migrations(_engine, _is_postgres)
@@ -45,7 +43,17 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialised")
 
-    # NOTE: Default Ollama provider seeding removed — users configure providers manually
+    # Optional SIH demo content. Idempotent: existing demo records are preserved.
+    # Disabled by default so normal deployments never receive synthetic data.
+    if os.getenv("SEED_DEMO_DATA", "false").strip().lower() in {"1", "true", "yes"}:
+        try:
+            from scripts.seed_demo_content import seed as seed_demo_content
+            await seed_demo_content()
+            logger.info("SIH demo content seeded")
+        except Exception:
+            logger.exception("SIH demo content seeding failed")
+
+    # Default Ollama provider seeding remains disabled; users configure providers manually.
     yield
     logger.info("Shutdown complete")
 
@@ -63,22 +71,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # ---- CORS ----
-    # FRONTEND_ORIGINS and FRONTEND_ORIGIN both support comma-separated allowlists.
-    # FRONTEND_ORIGINS takes precedence when both are configured.
     configured_origins = settings.frontend_origins.strip() or settings.frontend_origin.strip()
-    frontend_origins = [
-        origin.strip().rstrip("/")
-        for origin in configured_origins.split(",")
-        if origin.strip()
-    ]
-
-    # Keep local development origins available while production origins remain
-    # explicitly controlled by the environment variable above.
-    dev_origins = [] if is_production else [
-        "http://localhost:5173",
-        "http://localhost",
-    ]
+    frontend_origins = [origin.strip().rstrip("/") for origin in configured_origins.split(",") if origin.strip()]
+    dev_origins = [] if is_production else ["http://localhost:5173", "http://localhost"]
     allowed_origins = list(dict.fromkeys(frontend_origins + dev_origins))
 
     app.add_middleware(
@@ -111,24 +106,24 @@ def create_app() -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
 
     prefix = "/api/v1"
-    app.include_router(auth.router,            prefix=f"{prefix}/auth")
-    app.include_router(chat.router,            prefix=f"{prefix}/chat")
-    app.include_router(models.router,          prefix=f"{prefix}/models")
-    app.include_router(system.router,          prefix=f"{prefix}/system")
-    app.include_router(audit.router,           prefix=f"{prefix}/audit")
+    app.include_router(auth.router, prefix=f"{prefix}/auth")
+    app.include_router(chat.router, prefix=f"{prefix}/chat")
+    app.include_router(models.router, prefix=f"{prefix}/models")
+    app.include_router(system.router, prefix=f"{prefix}/system")
+    app.include_router(audit.router, prefix=f"{prefix}/audit")
     app.include_router(settings_router.router, prefix=f"{prefix}/settings")
-    app.include_router(providers.router,       prefix=f"{prefix}/models/providers")
+    app.include_router(providers.router, prefix=f"{prefix}/models/providers")
     app.include_router(knowledge_bases.router, prefix=f"{prefix}/knowledge-bases")
-    app.include_router(agents.router,          prefix=f"{prefix}/agents")
-    app.include_router(tools.router,           prefix=f"{prefix}/tools")
-    app.include_router(plugins.router,         prefix=f"{prefix}/plugins")
-    app.include_router(incidents.router,       prefix=f"{prefix}/incidents")
-    app.include_router(data.router,             prefix=f"{prefix}/data")
-    app.include_router(approvals.router,        prefix=f"{prefix}/approvals")
-    app.include_router(documents.router,        prefix=f"{prefix}/documents")
-    app.include_router(sensor_analysis.router,  prefix=f"{prefix}/sensor-analyses")
-    app.include_router(vision.router,           prefix=f"{prefix}")
-    app.include_router(artifacts.router,         prefix=f"{prefix}/artifacts")
+    app.include_router(agents.router, prefix=f"{prefix}/agents")
+    app.include_router(tools.router, prefix=f"{prefix}/tools")
+    app.include_router(plugins.router, prefix=f"{prefix}/plugins")
+    app.include_router(incidents.router, prefix=f"{prefix}/incidents")
+    app.include_router(data.router, prefix=f"{prefix}/data")
+    app.include_router(approvals.router, prefix=f"{prefix}/approvals")
+    app.include_router(documents.router, prefix=f"{prefix}/documents")
+    app.include_router(sensor_analysis.router, prefix=f"{prefix}/sensor-analyses")
+    app.include_router(vision.router, prefix=f"{prefix}")
+    app.include_router(artifacts.router, prefix=f"{prefix}/artifacts")
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError):
@@ -137,39 +132,18 @@ def create_app() -> FastAPI:
             for e in errors:
                 entry = {k: v for k, v in e.items() if k != "ctx"}
                 if "ctx" in e:
-                    ctx = {k: str(v) for k, v in e["ctx"].items()}
-                    entry["ctx"] = ctx
+                    entry["ctx"] = {k: str(v) for k, v in e["ctx"].items()}
                 if "loc" in entry:
                     entry["loc"] = list(entry["loc"])
                 cleaned.append(entry)
             return cleaned
-
-        return JSONResponse(
-            status_code=422,
-            content={
-                "error": {
-                    "code": "validation_error",
-                    "message": "Input validation failed",
-                    "details": _clean(exc.errors()),
-                    "trace_id": getattr(request.state, "request_id", None),
-                }
-            },
-        )
+        return JSONResponse(status_code=422, content={"error": {"code": "validation_error", "message": "Input validation failed", "details": _clean(exc.errors()), "trace_id": getattr(request.state, "request_id", None)}})
 
     @app.exception_handler(Exception)
     async def global_error_handler(request: Request, exc: Exception):
         trace_id = getattr(request.state, "request_id", "unknown")
         logger.exception("Unhandled error", trace_id=trace_id, error=str(exc))
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": {
-                    "code": "internal_error",
-                    "message": "An unexpected error occurred.",
-                    "trace_id": trace_id,
-                },
-            },
-        )
+        return JSONResponse(status_code=500, content={"error": {"code": "internal_error", "message": "An unexpected error occurred.", "trace_id": trace_id}})
 
     return app
 
