@@ -50,8 +50,8 @@ class _FailoverLLM:
             provider_type = getattr(client, "provider_type", None) or ""
             if not provider_type:
                 provider_type = "gemini" if "gemini" in label.lower() or "gemini" in (configured_model or model or "").lower() else ""
-            candidates = self._candidate_models(provider_type, configured_model, model)
-            for effective_model in candidates or [model]:
+            candidates = self._candidate_models(provider_type, configured_model, model) or [model]
+            for effective_model in candidates:
                 try:
                     result = await client.chat(model=effective_model, messages=messages, stream=stream, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt)
                     self._cursor = idx
@@ -72,7 +72,6 @@ class _FailoverLLM:
         raise ModelUnavailableError("All configured embedding providers failed. " + " | ".join(errors[-4:]))
 
     async def health_check(self, model=None):
-        """Return aggregate provider health for system status and provider tests."""
         for client, configured_model, _label in self.providers:
             try:
                 reachable, latency = await client.health_check(configured_model or model)
@@ -113,8 +112,6 @@ class _ExplicitProviderFailover:
                 return await self._primary.chat(model=effective_model, messages=messages, stream=stream, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt)
             except Exception as primary_exc:
                 errors.append(f"{self._provider_type}/{effective_model}: {primary_exc}")
-                import logging
-                logging.getLogger(__name__).warning("Explicit provider/model failed: %s/%s; trying fallback candidate", self._provider_type, effective_model, exc_info=True)
         if self._failed_over:
             raise ModelUnavailableError("Selected provider failed after model fallbacks: " + " | ".join(errors[-4:]))
         self._failed_over = True
@@ -248,6 +245,19 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials | None = Se
     if not credentials or not credentials.credentials:
         raise HTTPException(401, "Not authenticated")
     return await AuthService(db).verify_token(credentials.credentials)
+
+
+def require_role(*roles: str):
+    async def _check(user: User = Depends(get_current_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(403, f"Insufficient permissions. Required: {list(roles)}, have: {user.role}")
+        return user
+    return _check
+
+
+CurrentUser = Depends(get_current_user)
+AdminRequired = Depends(require_role("admin"))
+AnalystRequired = Depends(require_role("analyst", "admin"))
 
 
 def get_client_ip(request) -> str | None:
