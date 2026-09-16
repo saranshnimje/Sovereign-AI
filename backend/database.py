@@ -3,7 +3,7 @@ Async SQLAlchemy engine and session factory.
 
 Supports both SQLite (local dev / Docker) and PostgreSQL (cloud deployment).
 - SQLite: StaticPool, WAL mode, check_same_thread disabled.
-- PostgreSQL: standard pool, no SQLite-specific pragmas.
+- PostgreSQL: bounded pool sized for the dashboard's concurrent API requests.
 """
 from datetime import datetime, timezone
 
@@ -42,6 +42,7 @@ class UTCDateTime(TypeDecorator):
             value = value.replace(tzinfo=timezone.utc)
         return value
 
+
 settings = get_settings()
 
 # Normalize PostgreSQL URL to use asyncpg driver
@@ -53,10 +54,20 @@ _is_postgres = _db_url.startswith("postgresql")
 
 
 if _is_postgres:
+    # Render serves several dashboard endpoints concurrently. SQLAlchemy's
+    # defaults (5 connections + 10 overflow, 30s wait) are too restrictive
+    # for that burst and can make the frontend retry/reload while requests
+    # are stuck waiting for a connection. Keep the pool bounded while giving
+    # the app enough headroom and fail fast if the database is genuinely full.
     engine = create_async_engine(
         _db_url,
         echo=False,
         pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=10,
+        pool_recycle=1800,
+        pool_use_lifo=True,
     )
 else:
     from sqlalchemy.pool import StaticPool
