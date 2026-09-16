@@ -1,9 +1,10 @@
 """
-Organization Data Search tool — lets the AI agent search company information.
+Organization Data Search tool — lets the AI agent search organization data
+that the current user is allowed to see.
 
-Searches across organization profiles, employees, departments, contacts,
-infrastructure, and financials. Returns structured results the agent can
-use to answer user questions about organizations.
+Searches organization profiles, employees, departments, contacts,
+infrastructure, and financials. Non-admin users are restricted to their own
+organizations, matching the Data page visibility model.
 """
 from __future__ import annotations
 
@@ -31,25 +32,29 @@ class OrgSearchOutput(BaseModel):
     summary: str
 
 
-async def execute(
-    validated_input: OrgSearchInput,
-    context: dict,
-) -> dict:
-    """Search organization data from the database."""
+async def execute(validated_input: OrgSearchInput, context: dict) -> dict:
+    """Search organization data visible to the requesting user."""
     db = context.get("db")
+    user = context.get("user")
     if db is None:
         return {"results": [], "summary": "No database connection available."}
+    if user is None or not getattr(user, "id", None):
+        return {"results": [], "summary": "No authenticated user context available."}
 
-    from sqlalchemy import select, or_
+    from sqlalchemy import select
     from models.data import Organization
 
     query_text = validated_input.query.lower().strip()
     category = (validated_input.category or "all").lower()
 
-    # Fetch all organizations (agent has read access to all)
-    result = await db.execute(select(Organization))
-    orgs = list(result.scalars().all())
+    # Match the Data page access model: normal users see their own records;
+    # admins may inspect organization records across the workspace.
+    stmt = select(Organization)
+    if getattr(user, "role", "") != "admin":
+        stmt = stmt.where(Organization.owner_id == str(user.id))
 
+    result = await db.execute(stmt)
+    orgs = list(result.scalars().all())
     matches: list[dict[str, Any]] = []
 
     for org in orgs:
@@ -68,121 +73,80 @@ async def execute(
             "email": org.email,
         }
         details = org.details
-
-        # --- Summary match (org-level fields) ---
         searchable_org = " ".join([
-            org.name or "",
-            org.description or "",
-            org.industry or "",
-            org.location or "",
-            org.ceo or "",
-            org.website or "",
+            org.name or "", org.description or "", org.industry or "",
+            org.location or "", org.ceo or "", org.website or "",
         ]).lower()
 
-        if category in ("all", "summary"):
-            if query_text in searchable_org:
-                matches.append({"type": "organization", **org_data, "relevance": "org_profile"})
-                continue
+        if category in ("all", "summary") and query_text in searchable_org:
+            matches.append({
+                "type": "organization", **org_data,
+                "relevance": "org_profile", "source": "organization_data",
+            })
+            # Avoid duplicating the same org in detail categories for an org-level hit.
+            continue
 
-        # --- Employee search ---
         if category in ("all", "employees"):
-            employees = details.get("employees", [])
-            for emp in employees:
-                emp_searchable = " ".join([
-                    emp.get("name", ""),
-                    emp.get("role", ""),
-                    emp.get("department", ""),
-                    emp.get("email", ""),
+            for emp in details.get("employees", []):
+                searchable = " ".join([
+                    emp.get("name", ""), emp.get("role", ""),
+                    emp.get("department", ""), emp.get("email", ""),
                 ]).lower()
-                if query_text in emp_searchable or query_text in searchable_org:
-                    matches.append({
-                        "type": "employee",
-                        "organization": org.name,
-                        "org_id": org.id,
-                        **emp,
-                        "relevance": "employee",
-                    })
+                if query_text in searchable or query_text in searchable_org:
+                    matches.append({"type": "employee", "organization": org.name,
+                                    "org_id": org.id, **emp,
+                                    "relevance": "employee", "source": "organization_data"})
 
-        # --- Department search ---
         if category in ("all", "departments"):
-            departments = details.get("departments", [])
-            for dept in departments:
-                dept_searchable = " ".join([
-                    dept.get("name", ""),
-                    dept.get("head", ""),
+            for dept in details.get("departments", []):
+                searchable = " ".join([
+                    dept.get("name", ""), dept.get("head", ""),
                     dept.get("description", ""),
                 ]).lower()
-                if query_text in dept_searchable or query_text in searchable_org:
-                    matches.append({
-                        "type": "department",
-                        "organization": org.name,
-                        "org_id": org.id,
-                        **dept,
-                        "relevance": "department",
-                    })
+                if query_text in searchable or query_text in searchable_org:
+                    matches.append({"type": "department", "organization": org.name,
+                                    "org_id": org.id, **dept,
+                                    "relevance": "department", "source": "organization_data"})
 
-        # --- Contact search ---
         if category in ("all", "contacts"):
-            contacts = details.get("contacts", [])
-            for contact in contacts:
-                contact_searchable = " ".join([
-                    contact.get("name", ""),
-                    contact.get("role", ""),
-                    contact.get("email", ""),
-                    contact.get("phone", ""),
+            for contact in details.get("contacts", []):
+                searchable = " ".join([
+                    contact.get("name", ""), contact.get("role", ""),
+                    contact.get("email", ""), contact.get("phone", ""),
                 ]).lower()
-                if query_text in contact_searchable or query_text in searchable_org:
-                    matches.append({
-                        "type": "contact",
-                        "organization": org.name,
-                        "org_id": org.id,
-                        **contact,
-                        "relevance": "contact",
-                    })
+                if query_text in searchable or query_text in searchable_org:
+                    matches.append({"type": "contact", "organization": org.name,
+                                    "org_id": org.id, **contact,
+                                    "relevance": "contact", "source": "organization_data"})
 
-        # --- Infrastructure search ---
         if category in ("all", "infrastructure"):
-            infra = details.get("infrastructure", [])
-            for item in infra:
-                infra_searchable = " ".join([
-                    item.get("name", ""),
-                    item.get("type", ""),
-                    item.get("location", ""),
-                    item.get("status", ""),
+            for item in details.get("infrastructure", []):
+                searchable = " ".join([
+                    item.get("name", ""), item.get("type", ""),
+                    item.get("location", ""), item.get("status", ""),
                 ]).lower()
-                if query_text in infra_searchable or query_text in searchable_org:
-                    matches.append({
-                        "type": "infrastructure",
-                        "organization": org.name,
-                        "org_id": org.id,
-                        **item,
-                        "relevance": "infrastructure",
-                    })
+                if query_text in searchable or query_text in searchable_org:
+                    matches.append({"type": "infrastructure", "organization": org.name,
+                                    "org_id": org.id, **item,
+                                    "relevance": "infrastructure", "source": "organization_data"})
 
-        # --- Financials search ---
         if category in ("all", "financials"):
             financials = details.get("financials", {})
             if isinstance(financials, dict) and financials:
-                fin_searchable = json.dumps(financials).lower()
-                if query_text in fin_searchable or query_text in searchable_org:
-                    matches.append({
-                        "type": "financials",
-                        "organization": org.name,
-                        "org_id": org.id,
-                        **financials,
-                        "relevance": "financials",
-                    })
+                searchable = json.dumps(financials).lower()
+                if query_text in searchable or query_text in searchable_org:
+                    matches.append({"type": "financials", "organization": org.name,
+                                    "org_id": org.id, **financials,
+                                    "relevance": "financials", "source": "organization_data"})
 
-    # Build summary
     if not matches:
         summary = f"No results found for '{validated_input.query}'."
     else:
-        org_names = list({m.get("organization", "Unknown") for m in matches})
+        org_names = list({m.get("organization", m.get("name", "Unknown")) for m in matches})
         types = list({m.get("type", "unknown") for m in matches})
         summary = (
-            f"Found {len(matches)} result(s) across {len(org_names)} organization(s): "
-            f"{', '.join(org_names)}. "
-            f"Categories: {', '.join(types)}."
+            f"Found {len(matches)} result(s) across {len(org_names)} visible organization(s): "
+            f"{', '.join(org_names)}. Categories: {', '.join(types)}."
         )
 
     return {"results": matches[:50], "summary": summary}
