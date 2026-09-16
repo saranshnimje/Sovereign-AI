@@ -62,9 +62,112 @@ class _FailoverLLM:
         raise ModelUnavailableError("All configured embedding providers failed. " + " | ".join(errors[-4:]))
 
 
+class _ExplicitProviderFailover:
+    """Wrap a UI-selected provider and fail over using DB-configured models.
+
+    This is intentionally lazy: the primary provider is selected exactly as the
+    UI requested, but if it returns a quota/rate-limit/network/provider error,
+    the next enabled provider is tried with *its own* configured model. This
+    prevents a Gemini model id from being sent to an unrelated provider.
+    """
+    def __init__(self, primary, base_url: str | None, provider_type: str | None):
+        self._primary = primary
+        self._base_url = (base_url or "").rstrip("/")
+        self._provider_type = provider_type
+        self._failed_over = False
+
+    async def chat(self, model, messages, stream=False, temperature=0.7, max_tokens=2048, system_prompt=None):
+        try:
+            return await self._primary.chat(
+                model=model,
+                messages=messages,
+                stream=stream,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+            )
+        except Exception as primary_exc:
+            if self._failed_over:
+                raise
+            self._failed_over = True
+            fallback = await self._resolve_fallback()
+            if fallback is None:
+                raise
+            client, fallback_model, label = fallback
+            try:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Explicit provider failed; switching to %s after: %s",
+                    label, primary_exc,
+                )
+                return await client.chat(
+                    model=fallback_model or model,
+                    messages=messages,
+                    stream=stream,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    system_prompt=system_prompt,
+                )
+            except Exception as fallback_exc:
+                raise ModelUnavailableError(
+                    f"Selected provider and fallback provider failed: {primary_exc}; {fallback_exc}"
+                ) from fallback_exc
+
+    async def embed(self, model, texts):
+        return await self._primary.embed(model, texts)
+
+    async def _resolve_fallback(self):
+        try:
+            from database import AsyncSessionLocal
+            from models.provider import LLMProvider
+            from services.llm_client import build_provider as raw_build_provider
+            from sqlalchemy import select
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(LLMProvider).where(LLMProvider.enabled == True))
+                providers = list(result.scalars().all())
+            # Prefer a different endpoint/provider. Keep deterministic DB order.
+            for provider in providers:
+                if (provider.base_url or "").rstrip("/") == self._base_url and provider.provider_type == self._provider_type:
+                    continue
+                try:
+                    client = raw_build_provider(
+                        provider_type=provider.provider_type,
+                        base_url=provider.base_url,
+                        api_key=provider.api_key,
+                        custom_headers=provider.custom_headers if hasattr(provider, "custom_headers") and provider.custom_headers else None,
+                    )
+                    return client, getattr(provider, "model_name", None), provider.name
+                except Exception:
+                    continue
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Unable to resolve explicit-provider fallback: %s", exc)
+        return None
+
+
+# Patch the module-level factory used by chat.py's explicit provider path. The
+# role resolver below keeps using the raw factory so it does not recursively
+# wrap its own failover clients.
+from services import llm_client as _llm_client_module
+_raw_build_provider = _llm_client_module.build_provider
+
+
+def _build_provider_with_runtime_failover(provider_type, base_url, api_key, timeout=600.0, custom_headers=None):
+    primary = _raw_build_provider(
+        provider_type=provider_type,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=timeout,
+        custom_headers=custom_headers,
+    )
+    return _ExplicitProviderFailover(primary, base_url, provider_type)
+
+
+_llm_client_module.build_provider = _build_provider_with_runtime_failover
+
+
 async def _build_failover(db: AsyncSession, preferred_provider_id: str | None = None, role: str = "chat"):
     from services.model_service import _load_roles
-    from services.llm_client import build_provider
     from sqlalchemy import select as _select
     from models.provider import LLMProvider
 
@@ -78,7 +181,7 @@ async def _build_failover(db: AsyncSession, preferred_provider_id: str | None = 
     providers = []
     for provider in all_providers:
         try:
-            client = build_provider(
+            client = _raw_build_provider(
                 provider_type=provider.provider_type,
                 base_url=provider.base_url,
                 api_key=provider.api_key,
@@ -109,7 +212,6 @@ async def resolve_llm_with_failover(
 ):
     """Resolve an LLM client with provider failover."""
     from services.model_service import _load_roles
-    from services.llm_client import build_provider
     from sqlalchemy import select as _select
     from models.provider import LLMProvider
     from services.provider_health import get_health_tracker, classify_provider_error
@@ -136,9 +238,12 @@ async def resolve_llm_with_failover(
         if not health.is_available():
             continue
         try:
-            client = build_provider(provider_type=prov.provider_type, base_url=prov.base_url,
-                                    api_key=prov.api_key,
-                                    custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None)
+            client = _raw_build_provider(
+                provider_type=prov.provider_type,
+                base_url=prov.base_url,
+                api_key=prov.api_key,
+                custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None,
+            )
             return client, prov.id
         except Exception as exc:
             health_tracker.record_failure(prov.id, str(exc))
