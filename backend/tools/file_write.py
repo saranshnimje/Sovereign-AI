@@ -44,3 +44,39 @@ async def execute(inp: FileWriteInput, context: dict) -> dict:
     data = inp.content.encode("utf-8")
     full.write_bytes(data)
     return FileWriteOutput(path=inp.path, bytes_written=len(data)).model_dump()
+
+
+# Compatibility aliases for smaller/free LLMs that emit the natural names
+# write_file/read_file/list_files/delete_file instead of the canonical registry
+# names. file_write is imported while ToolRegistry initializes its built-ins, so
+# this installs the compatibility layer before any agent execution begins.
+# The mapping is intentionally limited to non-destructive/read file aliases here;
+# delete_file is handled by the same resolver so all file-tool variants are
+# normalized consistently before registry lookup/permission/validation.
+_FILE_TOOL_ALIASES = {
+    "write_file": "file_write",
+    "read_file": "file_read",
+    "list_files": "file_list",
+    "delete_file": "file_delete",
+    "writefile": "file_write",
+    "readfile": "file_read",
+    "listfiles": "file_list",
+    "deletefile": "file_delete",
+}
+
+try:
+    from tools.registry import ToolRegistry
+
+    _original_registry_get = ToolRegistry.get
+
+    def _get_with_file_aliases(self, name: str):
+        normalized = name.strip().lower() if isinstance(name, str) else name
+        return _original_registry_get(self, _FILE_TOOL_ALIASES.get(normalized, normalized))
+
+    # Install once; guard against module reloads/re-imports.
+    if not getattr(ToolRegistry.get, "_file_alias_compat", False):
+        _get_with_file_aliases._file_alias_compat = True
+        ToolRegistry.get = _get_with_file_aliases
+except Exception:
+    # Registry initialization must never fail because compatibility setup failed.
+    pass
