@@ -25,15 +25,7 @@ def get_llm_client() -> OllamaClient:
 
 
 class _FailoverLLM:
-    """Provider/model failover wrapper used by chat and agent runtime.
-
-    A provider can exhaust a model-specific quota (for example Gemini free-tier
-    limits) while another model at the same endpoint is still usable. We first
-    try the configured provider model, then safe model fallbacks for Gemini,
-    then continue through every other enabled provider using that provider's
-    own configured model. This keeps failover inside the LLM gateway instead of
-    forcing AgentRuntime to know provider details.
-    """
+    """Provider/model failover wrapper used by chat and agent runtime."""
     def __init__(self, providers):
         self.providers = providers
         self._cursor = 0
@@ -42,62 +34,32 @@ class _FailoverLLM:
     def _candidate_models(provider_type, configured_model, requested_model):
         primary = configured_model or requested_model
         candidates = [primary] if primary else []
-
-        # Gemini free-tier quotas can be model-specific. If the configured
-        # provider is Gemini and the selected model is exhausted, try the
-        # compatible lite model before declaring the provider unavailable.
         if provider_type == "gemini":
-            gemini_fallbacks = [
-                "gemini-2.5-flash-lite",
-                "gemini-3.5-flash-lite",
-                "gemini-2.5-flash",
-            ]
-            for fallback_model in gemini_fallbacks:
+            for fallback_model in ("gemini-2.5-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"):
                 if fallback_model not in candidates:
                     candidates.append(fallback_model)
-
         return candidates
 
     async def chat(self, model, messages, stream=False, temperature=0.7, max_tokens=2048, system_prompt=None):
         errors = []
         if not self.providers:
             raise ModelUnavailableError("No configured LLM providers are available")
-
         for offset in range(len(self.providers)):
             idx = (self._cursor + offset) % len(self.providers)
             client, configured_model, label = self.providers[idx]
             provider_type = getattr(client, "provider_type", None) or ""
-
-            # The provider factory does not expose provider_type consistently,
-            # so infer Gemini from the label/model when necessary. The explicit
-            # provider path still passes its type directly to its own wrapper.
             if not provider_type:
-                provider_type = "gemini" if "gemini" in label.lower() or "gemini" in (configured_model or model).lower() else ""
-
+                provider_type = "gemini" if "gemini" in label.lower() or "gemini" in (configured_model or model or "").lower() else ""
             candidates = self._candidate_models(provider_type, configured_model, model)
-            if not candidates:
-                candidates = [model]
-
-            for effective_model in candidates:
+            for effective_model in candidates or [model]:
                 try:
-                    result = await client.chat(
-                        model=effective_model,
-                        messages=messages,
-                        stream=stream,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        system_prompt=system_prompt,
-                    )
+                    result = await client.chat(model=effective_model, messages=messages, stream=stream, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt)
                     self._cursor = idx
                     return result
                 except Exception as exc:
                     errors.append(f"{label}/{effective_model}: {exc}")
                     import logging
-                    logging.getLogger(__name__).warning(
-                        "LLM provider/model failed; trying next candidate: %s/%s",
-                        label, effective_model, exc_info=True,
-                    )
-
+                    logging.getLogger(__name__).warning("LLM provider/model failed; trying next candidate: %s/%s", label, effective_model, exc_info=True)
         raise ModelUnavailableError("All configured LLM providers/models failed. " + " | ".join(errors[-8:]))
 
     async def embed(self, model, texts):
@@ -109,6 +71,26 @@ class _FailoverLLM:
                 errors.append(f"{label}: {exc}")
         raise ModelUnavailableError("All configured embedding providers failed. " + " | ".join(errors[-4:]))
 
+    async def health_check(self, model=None):
+        """Return aggregate provider health for system status and provider tests."""
+        for client, configured_model, _label in self.providers:
+            try:
+                reachable, latency = await client.health_check(configured_model or model)
+                if reachable:
+                    return True, latency
+            except Exception:
+                continue
+        return False, None
+
+    async def list_models(self):
+        models = []
+        for client, _configured_model, _label in self.providers:
+            try:
+                models.extend(await client.list_models())
+            except Exception:
+                continue
+        return models
+
 
 class _ExplicitProviderFailover:
     """Wrap a UI-selected provider and fail over using DB-configured models."""
@@ -117,6 +99,7 @@ class _ExplicitProviderFailover:
         self._base_url = (base_url or "").rstrip("/")
         self._provider_type = provider_type
         self._failed_over = False
+        self.provider_type = provider_type
 
     async def chat(self, model, messages, stream=False, temperature=0.7, max_tokens=2048, system_prompt=None):
         candidates = [model] if model else []
@@ -124,55 +107,40 @@ class _ExplicitProviderFailover:
             for fallback_model in ("gemini-2.5-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"):
                 if fallback_model not in candidates:
                     candidates.append(fallback_model)
-
         errors = []
         for effective_model in candidates or [model]:
             try:
-                return await self._primary.chat(
-                    model=effective_model,
-                    messages=messages,
-                    stream=stream,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    system_prompt=system_prompt,
-                )
+                return await self._primary.chat(model=effective_model, messages=messages, stream=stream, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt)
             except Exception as primary_exc:
                 errors.append(f"{self._provider_type}/{effective_model}: {primary_exc}")
                 import logging
-                logging.getLogger(__name__).warning(
-                    "Explicit provider/model failed: %s/%s; trying fallback candidate",
-                    self._provider_type, effective_model, exc_info=True,
-                )
-
+                logging.getLogger(__name__).warning("Explicit provider/model failed: %s/%s; trying fallback candidate", self._provider_type, effective_model, exc_info=True)
         if self._failed_over:
             raise ModelUnavailableError("Selected provider failed after model fallbacks: " + " | ".join(errors[-4:]))
         self._failed_over = True
         fallback = await self._resolve_fallback()
         if fallback is None:
             raise ModelUnavailableError("Selected provider failed and no alternate enabled provider is configured. " + " | ".join(errors[-4:]))
-
         client, fallback_model, label = fallback
         try:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Explicit provider failed; switching to %s after: %s",
-                label, errors[-1] if errors else "unknown error",
-            )
-            return await client.chat(
-                model=fallback_model or model,
-                messages=messages,
-                stream=stream,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                system_prompt=system_prompt,
-            )
+            return await client.chat(model=fallback_model or model, messages=messages, stream=stream, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt)
         except Exception as fallback_exc:
-            raise ModelUnavailableError(
-                f"Selected provider and fallback provider failed: {'; '.join(errors[-2:])}; {fallback_exc}"
-            ) from fallback_exc
+            raise ModelUnavailableError(f"Selected provider and fallback provider failed: {'; '.join(errors[-2:])}; {fallback_exc}") from fallback_exc
 
     async def embed(self, model, texts):
         return await self._primary.embed(model, texts)
+
+    async def health_check(self, model=None):
+        return await self._primary.health_check(model)
+
+    async def list_models(self):
+        return await self._primary.list_models()
+
+    async def verify_auth(self, model=None):
+        verifier = getattr(self._primary, "verify_auth", None)
+        if verifier:
+            return await verifier(model)
+        return None, None
 
     async def _resolve_fallback(self):
         try:
@@ -187,12 +155,7 @@ class _ExplicitProviderFailover:
                 if (provider.base_url or "").rstrip("/") == self._base_url and provider.provider_type == self._provider_type:
                     continue
                 try:
-                    client = raw_build_provider(
-                        provider_type=provider.provider_type,
-                        base_url=provider.base_url,
-                        api_key=provider.api_key,
-                        custom_headers=provider.custom_headers if hasattr(provider, "custom_headers") and provider.custom_headers else None,
-                    )
+                    client = raw_build_provider(provider_type=provider.provider_type, base_url=provider.base_url, api_key=provider.api_key, custom_headers=provider.custom_headers if hasattr(provider, "custom_headers") and provider.custom_headers else None)
                     return client, getattr(provider, "model_name", None), provider.name
                 except Exception:
                     continue
@@ -207,13 +170,7 @@ _raw_build_provider = _llm_client_module.build_provider
 
 
 def _build_provider_with_runtime_failover(provider_type, base_url, api_key, timeout=600.0, custom_headers=None):
-    primary = _raw_build_provider(
-        provider_type=provider_type,
-        base_url=base_url,
-        api_key=api_key,
-        timeout=timeout,
-        custom_headers=custom_headers,
-    )
+    primary = _raw_build_provider(provider_type=provider_type, base_url=base_url, api_key=api_key, timeout=timeout, custom_headers=custom_headers)
     return _ExplicitProviderFailover(primary, base_url, provider_type)
 
 
@@ -224,24 +181,15 @@ async def _build_failover(db: AsyncSession, preferred_provider_id: str | None = 
     from services.model_service import _load_roles
     from sqlalchemy import select as _select
     from models.provider import LLMProvider
-
     roles = _load_roles()
-    role_provider_id = roles.get(f"{role}_provider_id")
-    preferred = preferred_provider_id or role_provider_id
+    preferred = preferred_provider_id or roles.get(f"{role}_provider_id")
     result = await db.execute(_select(LLMProvider).where(LLMProvider.enabled == True))
     all_providers = list(result.scalars().all())
     all_providers.sort(key=lambda p: 0 if p.id == preferred else 1)
-
     providers = []
     for provider in all_providers:
         try:
-            client = _raw_build_provider(
-                provider_type=provider.provider_type,
-                base_url=provider.base_url,
-                api_key=provider.api_key,
-                custom_headers=provider.custom_headers if hasattr(provider, 'custom_headers') and provider.custom_headers else None,
-            )
-            # Keep provider type available for robust same-provider model fallback.
+            client = _raw_build_provider(provider_type=provider.provider_type, base_url=provider.base_url, api_key=provider.api_key, custom_headers=provider.custom_headers if hasattr(provider, 'custom_headers') and provider.custom_headers else None)
             try:
                 client.provider_type = provider.provider_type
             except Exception:
@@ -254,41 +202,29 @@ async def _build_failover(db: AsyncSession, preferred_provider_id: str | None = 
 
 
 async def resolve_llm_for_role_async(db: AsyncSession, role: str):
-    """Resolve a role LLM with automatic provider/model failover."""
     return await _build_failover(db, role=role)
 
 
 async def resolve_llm_for_provider_async(db: AsyncSession, provider_id: str, role: str = "chat"):
-    """Resolve an explicitly selected provider, with automatic fallback."""
     return await _build_failover(db, preferred_provider_id=provider_id, role=role)
 
 
-async def resolve_llm_with_failover(
-    db: AsyncSession,
-    role: str,
-    exclude_provider_id: str | None = None,
-    error: str | None = None,
-):
-    """Resolve an LLM client with provider failover."""
+async def resolve_llm_with_failover(db: AsyncSession, role: str, exclude_provider_id: str | None = None, error: str | None = None):
     from services.model_service import _load_roles
     from sqlalchemy import select as _select
     from models.provider import LLMProvider
     from services.provider_health import get_health_tracker, classify_provider_error
-
     health_tracker = get_health_tracker()
     if error and exclude_provider_id:
         is_rate_limit, _ = classify_provider_error(error)
         health_tracker.record_failure(exclude_provider_id, error, is_rate_limit)
-
     roles = _load_roles()
     provider_id = roles.get(f"{role}_provider_id")
     result = await db.execute(_select(LLMProvider).where(LLMProvider.enabled == True))
     all_providers = list(result.scalars().all())
-
     def sort_key(p):
         health = health_tracker.get(p.id)
         return (0 if p.id == provider_id else 1, health.consecutive_failures, health.avg_latency_ms)
-
     all_providers.sort(key=sort_key)
     for prov in all_providers:
         if prov.id == exclude_provider_id:
@@ -297,12 +233,7 @@ async def resolve_llm_with_failover(
         if not health.is_available():
             continue
         try:
-            client = _raw_build_provider(
-                provider_type=prov.provider_type,
-                base_url=prov.base_url,
-                api_key=prov.api_key,
-                custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None,
-            )
+            client = _raw_build_provider(provider_type=prov.provider_type, base_url=prov.base_url, api_key=prov.api_key, custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None)
             try:
                 client.provider_type = prov.provider_type
             except Exception:
