@@ -25,12 +25,7 @@ def get_llm_client() -> OllamaClient:
 
 
 class _FailoverLLM:
-    """Provider failover wrapper used by agent/chat runtime.
-
-    The selected role provider is tried first. On quota/rate-limit, timeout,
-    connectivity, or provider-unavailable errors, the next enabled provider is
-    tried automatically. Each provider keeps its own configured model name.
-    """
+    """Provider failover wrapper used by chat/agent runtime."""
     def __init__(self, providers):
         self.providers = providers
         self._cursor = 0
@@ -44,20 +39,17 @@ class _FailoverLLM:
             client, configured_model, label = self.providers[idx]
             effective_model = configured_model or model
             try:
-                result = await client.chat(
-                    model=effective_model,
-                    messages=messages,
-                    stream=stream,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    system_prompt=system_prompt,
-                )
+                result = await client.chat(model=effective_model, messages=messages, stream=stream,
+                                           temperature=temperature, max_tokens=max_tokens,
+                                           system_prompt=system_prompt)
                 self._cursor = idx
                 return result
             except Exception as exc:
                 errors.append(f"{label}: {exc}")
-                logger = __import__("logging").getLogger(__name__)
-                logger.warning("LLM provider failed; trying next provider: %s", label, exc_info=True)
+                import logging
+                logging.getLogger(__name__).warning(
+                    "LLM provider failed; trying next provider: %s", label, exc_info=True
+                )
         raise ModelUnavailableError("All configured LLM providers failed. " + " | ".join(errors[-4:]))
 
     async def embed(self, model, texts):
@@ -70,20 +62,19 @@ class _FailoverLLM:
         raise ModelUnavailableError("All configured embedding providers failed. " + " | ".join(errors[-4:]))
 
 
-async def resolve_llm_for_role_async(db: AsyncSession, role: str):
-    """Resolve a role LLM with automatic provider failover."""
+async def _build_failover(db: AsyncSession, preferred_provider_id: str | None = None, role: str = "chat"):
     from services.model_service import _load_roles
     from services.llm_client import build_provider
     from sqlalchemy import select as _select
     from models.provider import LLMProvider
 
     roles = _load_roles()
-    bound_provider_id = roles.get(f"{role}_provider_id")
+    role_provider_id = roles.get(f"{role}_provider_id")
+    preferred = preferred_provider_id or role_provider_id
     result = await db.execute(_select(LLMProvider).where(LLMProvider.enabled == True))
     all_providers = list(result.scalars().all())
+    all_providers.sort(key=lambda p: 0 if p.id == preferred else 1)
 
-    # Prefer the role-bound provider, then the remaining enabled providers.
-    all_providers.sort(key=lambda p: 0 if p.id == bound_provider_id else 1)
     providers = []
     for provider in all_providers:
         try:
@@ -95,13 +86,19 @@ async def resolve_llm_for_role_async(db: AsyncSession, role: str):
             )
             providers.append((client, getattr(provider, "model_name", None), provider.name))
         except Exception as exc:
-            __import__("logging").getLogger(__name__).warning(
-                "Skipping unavailable provider %s: %s", provider.name, exc
-            )
+            import logging
+            logging.getLogger(__name__).warning("Skipping unavailable provider %s: %s", provider.name, exc)
+    return _FailoverLLM(providers) if providers else get_llm_client()
 
-    if providers:
-        return _FailoverLLM(providers)
-    return get_llm_client()
+
+async def resolve_llm_for_role_async(db: AsyncSession, role: str):
+    """Resolve a role LLM with automatic provider failover."""
+    return await _build_failover(db, role=role)
+
+
+async def resolve_llm_for_provider_async(db: AsyncSession, provider_id: str, role: str = "chat"):
+    """Resolve an explicitly selected provider, with automatic fallback."""
+    return await _build_failover(db, preferred_provider_id=provider_id, role=role)
 
 
 async def resolve_llm_with_failover(
@@ -139,33 +136,19 @@ async def resolve_llm_with_failover(
         if not health.is_available():
             continue
         try:
-            client = build_provider(
-                provider_type=prov.provider_type,
-                base_url=prov.base_url,
-                api_key=prov.api_key,
-                custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None,
-            )
+            client = build_provider(provider_type=prov.provider_type, base_url=prov.base_url,
+                                    api_key=prov.api_key,
+                                    custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None)
             return client, prov.id
         except Exception as exc:
             health_tracker.record_failure(prov.id, str(exc))
-            continue
-
-    raise ModelUnavailableError(
-        "All configured LLM providers are unavailable. Check provider health status and API keys."
-    )
+    raise ModelUnavailableError("All configured LLM providers are unavailable. Check provider health status and API keys.")
 
 
-# ------------------------------------------------------------------
-# Auth dependencies
-# ------------------------------------------------------------------
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
-    db: AsyncSession = Depends(get_db),
-) -> User:
+async def get_current_user(credentials: HTTPAuthorizationCredentials | None = Security(_bearer), db: AsyncSession = Depends(get_db)) -> User:
     if not credentials or not credentials.credentials:
         raise HTTPException(401, "Not authenticated")
-    service = AuthService(db)
-    return await service.verify_token(credentials.credentials)
+    return await AuthService(db).verify_token(credentials.credentials)
 
 
 def get_client_ip(request) -> str | None:
@@ -179,7 +162,6 @@ def require_role(*roles: str):
             raise HTTPException(403, f"Insufficient permissions. Required: {list(roles)}, have: {user.role}")
         return user
     return _check
-
 
 CurrentUser = Depends(get_current_user)
 AdminRequired = Depends(require_role("admin"))
