@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -18,9 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class OrgSearchInput(BaseModel):
-    query: str = Field(
-        ..., description="Search query — organization name, employee name, department, or keyword"
-    )
+    query: str = Field(..., description="Search query — organization name, employee name, department, or keyword")
     category: str | None = Field(
         None,
         description="Optional filter: 'all', 'employees', 'departments', 'contacts', 'infrastructure', 'financials', 'summary'",
@@ -32,12 +31,26 @@ class OrgSearchOutput(BaseModel):
     summary: str
 
 
+@asynccontextmanager
+async def _session_from_context(context: dict):
+    """Use the runtime session when available; otherwise create one.
+
+    AgentRuntime historically supplied services but not the DB session to every
+    domain tool. Keeping this fallback here makes organization search work from
+    both AgentRuntime and AgentService without weakening user scoping.
+    """
+    db = context.get("db")
+    if db is not None:
+        yield db
+        return
+    from database import AsyncSessionLocal
+    async with AsyncSessionLocal() as session:
+        yield session
+
+
 async def execute(validated_input: OrgSearchInput, context: dict) -> dict:
     """Search organization data visible to the requesting user."""
-    db = context.get("db")
     user = context.get("user")
-    if db is None:
-        return {"results": [], "summary": "No database connection available."}
     if user is None or not getattr(user, "id", None):
         return {"results": [], "summary": "No authenticated user context available."}
 
@@ -47,30 +60,22 @@ async def execute(validated_input: OrgSearchInput, context: dict) -> dict:
     query_text = validated_input.query.lower().strip()
     category = (validated_input.category or "all").lower()
 
-    # Match the Data page access model: normal users see their own records;
-    # admins may inspect organization records across the workspace.
-    stmt = select(Organization)
-    if getattr(user, "role", "") != "admin":
-        stmt = stmt.where(Organization.owner_id == str(user.id))
+    async with _session_from_context(context) as db:
+        stmt = select(Organization)
+        if getattr(user, "role", "") != "admin":
+            stmt = stmt.where(Organization.owner_id == str(user.id))
+        result = await db.execute(stmt)
+        orgs = list(result.scalars().all())
 
-    result = await db.execute(stmt)
-    orgs = list(result.scalars().all())
     matches: list[dict[str, Any]] = []
 
     for org in orgs:
-        org_data: dict[str, Any] = {
-            "id": org.id,
-            "name": org.name,
-            "description": org.description,
-            "industry": org.industry,
-            "location": org.location,
-            "website": org.website,
-            "founded": org.founded,
-            "employee_count": org.employee_count,
-            "revenue": org.revenue,
-            "ceo": org.ceo,
-            "phone": org.phone,
-            "email": org.email,
+        org_data = {
+            "id": org.id, "name": org.name, "description": org.description,
+            "industry": org.industry, "location": org.location,
+            "website": org.website, "founded": org.founded,
+            "employee_count": org.employee_count, "revenue": org.revenue,
+            "ceo": org.ceo, "phone": org.phone, "email": org.email,
         }
         details = org.details
         searchable_org = " ".join([
@@ -79,11 +84,8 @@ async def execute(validated_input: OrgSearchInput, context: dict) -> dict:
         ]).lower()
 
         if category in ("all", "summary") and query_text in searchable_org:
-            matches.append({
-                "type": "organization", **org_data,
-                "relevance": "org_profile", "source": "organization_data",
-            })
-            # Avoid duplicating the same org in detail categories for an org-level hit.
+            matches.append({"type": "organization", **org_data,
+                            "relevance": "org_profile", "source": "organization_data"})
             continue
 
         if category in ("all", "employees"):
@@ -148,5 +150,4 @@ async def execute(validated_input: OrgSearchInput, context: dict) -> dict:
             f"Found {len(matches)} result(s) across {len(org_names)} visible organization(s): "
             f"{', '.join(org_names)}. Categories: {', '.join(types)}."
         )
-
     return {"results": matches[:50], "summary": summary}
