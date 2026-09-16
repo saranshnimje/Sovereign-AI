@@ -68,7 +68,6 @@ export default function LoginPage() {
     } finally { setLoading(false) }
   }
 
-  // Fill the form with a demo user's credentials. Does NOT submit.
   const useDemoCredentials = (demo: DemoUser) => {
     if (!demo.has_demo_password || !demo.demo_password) return
     setSetupMode(false)
@@ -78,7 +77,6 @@ export default function LoginPage() {
     setError('')
   }
 
-  // One-click SIH demo account autofill. Does NOT submit the form.
   const fillDemoAdmin = () => {
     setEmail(DEMO_ADMIN.email)
     setPassword(DEMO_ADMIN.password)
