@@ -2,7 +2,6 @@
 import json
 import logging
 import time
-from functools import lru_cache
 
 import httpx
 import psutil
@@ -89,10 +88,26 @@ async def get_system_status() -> SystemStatus:
 
 
 def _get_resource_metrics() -> ResourceMetrics:
+    """Return metrics matching the public ResourceMetrics API contract."""
     try:
-        cpu = psutil.cpu_percent(interval=0.1)
+        cpu = float(psutil.cpu_percent(interval=0.1))
         vm = psutil.virtual_memory()
         disk = psutil.disk_usage("/")
-        return ResourceMetrics(cpu_percent=cpu, memory_percent=vm.percent, disk_percent=disk.percent)
-    except Exception:
-        return ResourceMetrics()
+        return ResourceMetrics(
+            cpu_percent=cpu,
+            ram_used_gb=vm.used / (1024 ** 3),
+            ram_total_gb=vm.total / (1024 ** 3),
+            disk_used_gb=disk.used / (1024 ** 3),
+            disk_total_gb=disk.total / (1024 ** 3),
+            gpu_available=False,
+        )
+    except Exception as exc:
+        logger.warning("Failed to collect resource metrics: %s", exc)
+        return ResourceMetrics(
+            cpu_percent=0.0,
+            ram_used_gb=0.0,
+            ram_total_gb=0.0,
+            disk_used_gb=0.0,
+            disk_total_gb=0.0,
+            gpu_available=False,
+        )
