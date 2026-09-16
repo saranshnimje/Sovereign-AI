@@ -155,7 +155,6 @@ export default function DashboardPage() {
   const docCount = summary?.document_count ?? 0
   const agentRuns = summary?.agent_run_count ?? 0
   const pendingApprovals = summary?.pending_approval_count ?? 0
-  const modelsLoaded = status?.models_loaded?.length ?? 0
   const servicesUp = status?.services ? Object.values(status.services).filter(s => s.status === 'up').length : 0
   const servicesTotal = status?.services ? Object.values(status.services).length : 1
   const sovereigntyScore = Math.round((servicesUp / servicesTotal) * 100)
@@ -187,7 +186,6 @@ export default function DashboardPage() {
               <p className="text-sm font-medium text-success-500 mt-3">FULLY LOCAL</p>
               <p className="text-[10px] text-neutral-500 mt-1">{servicesUp}/{servicesTotal} services operational</p>
             </div>
-
             <div className="bg-surface-raised border border-surface-border rounded-xl p-5">
               <h2 className="text-sm font-semibold text-white mb-4">System Health</h2>
               <div className="space-y-3">
@@ -199,72 +197,92 @@ export default function DashboardPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       {svc.latency_ms != null && <span className="text-[10px] text-neutral-500">{svc.latency_ms}ms</span>}
-                      <span className={`text-[10px] font-medium ${svc.status === 'up' ? 'text-success-500' : 'text-danger-500'}`}>
-                        {svc.status === 'up' ? 'Online' : 'Offline'}
-                      </span>
+                      <span className={`text-[10px] font-medium ${svc.status === 'up' ? 'text-success-500' : 'text-danger-500'}`}>{svc.status === 'up' ? 'Online' : 'Offline'}</span>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
-
             <div className="bg-surface-raised border border-surface-border rounded-xl p-5">
               <h2 className="text-sm font-semibold text-white mb-4">Resources Usage</h2>
               <div className="space-y-4">
                 <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs text-neutral-400">CPU Usage</span>
-                    <span className={`text-sm font-bold text-white ${flash['cpu'] ? 'text-cyan-400' : ''}`}>{cpuCurrent.toFixed(1)}% used</span>
-                  </div>
-                  <div className="h-2 bg-surface-overlay rounded-full overflow-hidden">
-                    <div className="h-full rounded-full bg-cyan-500 transition-all duration-300" style={{ width: `${cpuCurrent}%` }} />
-                  </div>
+                  <div className="flex items-center justify-between mb-1.5"><span className="text-xs text-neutral-400">CPU Usage</span><span className={`text-sm font-bold text-white ${flash['cpu'] ? 'text-cyan-400' : ''}`}>{cpuCurrent.toFixed(1)}% used</span></div>
+                  <div className="h-2 bg-surface-overlay rounded-full overflow-hidden"><div className="h-full rounded-full bg-cyan-500 transition-all duration-300" style={{ width: `${cpuCurrent}%` }} /></div>
                 </div>
-
                 <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs text-neutral-400">RAM Usage</span>
-                    <span className={`text-sm font-bold text-white ${flash['ram'] ? 'text-cyan-400' : ''}`}>
-                      {r ? `${r.ram_used_gb.toFixed(2)} / ${r.ram_total_gb.toFixed(2)} GB` : '—'}
-                    </span>
-                  </div>
-                  <div className="h-2 bg-surface-overlay rounded-full overflow-hidden">
-                    <div className="h-full rounded-full bg-navy-400 transition-all duration-300" style={{ width: `${ramCurrent}%` }} />
-                  </div>
+                  <div className="flex items-center justify-between mb-1.5"><span className="text-xs text-neutral-400">RAM Usage</span><span className={`text-sm font-bold text-white ${flash['ram'] ? 'text-cyan-400' : ''}`}>{r ? `${r.ram_used_gb.toFixed(2)} / ${r.ram_total_gb.toFixed(2)} GB` : '—'}</span></div>
+                  <div className="h-2 bg-surface-overlay rounded-full overflow-hidden"><div className="h-full rounded-full bg-navy-400 transition-all duration-300" style={{ width: `${ramCurrent}%` }} /></div>
                   <p className="text-[10px] text-neutral-500 mt-1">{ramCurrent}% of RAM used</p>
                 </div>
-
                 <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs text-neutral-400">Disk Usage</span>
-                    <span className={`text-sm font-bold text-white ${flash['disk'] ? 'text-cyan-400' : ''}`}>
-                      {r ? `${r.disk_used_gb.toFixed(2)} / ${r.disk_total_gb.toFixed(2)} GB` : '—'}
-                    </span>
-                  </div>
-                  <div className="h-2 bg-surface-overlay rounded-full overflow-hidden">
-                    <div className="h-full rounded-full bg-violet-500 transition-all duration-300" style={{ width: `${diskCurrent}%` }} />
-                  </div>
+                  <div className="flex items-center justify-between mb-1.5"><span className="text-xs text-neutral-400">Disk Usage</span><span className={`text-sm font-bold text-white ${flash['disk'] ? 'text-cyan-400' : ''}`}>{r ? `${r.disk_used_gb.toFixed(2)} / ${r.disk_total_gb.toFixed(2)} GB` : '—'}</span></div>
+                  <div className="h-2 bg-surface-overlay rounded-full overflow-hidden"><div className="h-full rounded-full bg-violet-500 transition-all duration-300" style={{ width: `${diskCurrent}%` }} /></div>
                   <p className="text-[10px] text-neutral-500 mt-1">{diskCurrent}% of disk used</p>
                 </div>
-
                 <div className="pt-2 border-t border-surface-border">
                   <p className="text-xs text-neutral-400 mb-2">Models Loaded</p>
                   {status?.models_loaded && status.models_loaded.length > 0 ? (
-                    <div className="space-y-1.5">
-                      {status.models_loaded.map((m, i) => (
-                        <div key={i} className="flex items-center gap-2 px-2 py-1 bg-surface-overlay rounded-md">
-                          <span className="w-1.5 h-1.5 rounded-full bg-success-500 animate-pulse-cyan" />
-                          <span className="text-[11px] text-neutral-300 truncate">{m}</span>
-                          <span className="ml-auto text-[9px] text-success-500 font-medium">Ready</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-[11px] text-neutral-500">No models loaded</p>
-                  )}
+                    <div className="space-y-1.5">{status.models_loaded.map((m, i) => (
+                      <div key={i} className="flex items-center gap-2 px-2 py-1 bg-surface-overlay rounded-md"><span className="w-1.5 h-1.5 rounded-full bg-success-500 animate-pulse-cyan" /><span className="text-[11px] text-neutral-300 truncate">{m}</span><span className="ml-auto text-[9px] text-success-500 font-medium">Ready</span></div>
+                    ))}</div>
+                  ) : <p className="text-[11px] text-neutral-500">No models loaded</p>}
                 </div>
               </div>
             </div>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            {[
+              { label: 'Agent Runs', value: agentRuns, icon: 'Agents', color: 'text-cyan-400', key: 'agentRuns' },
+              { label: 'Knowledge Bases', value: kbCount, icon: 'KB', color: 'text-navy-400', key: 'kbCount' },
+              { label: 'Documents', value: docCount, icon: 'Docs', color: 'text-cyan-300', key: 'docCount' },
+              { label: 'Pending Approvals', value: pendingApprovals, icon: 'Review', color: pendingApprovals > 0 ? 'text-warning-500' : 'text-neutral-400', key: 'approvals' },
+            ].map((card) => (
+              <div key={card.key} className="bg-surface-raised border border-surface-border rounded-xl p-4 hover:border-cyan-700/50 transition-all">
+                <p className="text-[10px] text-neutral-400 uppercase tracking-wider mb-1">{card.label}</p>
+                <div className="flex items-end justify-between"><p className={`text-2xl font-bold text-white transition-all duration-300 ${flash[card.key] ? 'text-cyan-400 scale-110' : ''}`}>{card.value}</p><span className={`text-[10px] ${card.color} bg-surface-overlay px-2 py-0.5 rounded`}>{card.icon}</span></div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="bg-surface-raised border border-surface-border rounded-xl p-5">
+              <div className="flex items-center justify-between mb-4"><h2 className="text-sm font-semibold text-white">Recent Activity</h2>{user?.role === 'admin' && <Link to="/audit" className="text-[10px] text-cyan-400 hover:text-cyan-300">View all</Link>}</div>
+              {activity.length === 0 ? <p className="text-sm text-neutral-500 py-8 text-center">No activity yet</p> : (
+                <div className="space-y-0 max-h-80 overflow-y-auto pr-1">{activity.map(item => { const act = ACTIVITY_ICONS[item.outcome] || ACTIVITY_ICONS.pending; return (
+                  <div key={item.id} className="flex items-start gap-3 py-2.5 border-b border-surface-border last:border-0">
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${act.color}`}>{act.icon}</div>
+                    <div className="flex-1 min-w-0"><p className="text-xs text-neutral-200 truncate">{item.action}</p><p className="text-[10px] text-neutral-500 mt-0.5">{item.resource_type || item.event_type}</p></div>
+                    <span className="text-[10px] text-neutral-600 flex-shrink-0">{timeAgo(item.timestamp)}</span>
+                  </div>
+                )})}</div>
+              )}
+            </div>
+            <div className="space-y-4">
+              <div className="bg-surface-raised border border-surface-border rounded-xl p-5">
+                <h2 className="text-sm font-semibold text-white mb-3">System Info</h2>
+                <div className="grid grid-cols-2 gap-3">{[
+                  { label: 'Version', value: '2.1.0' }, { label: 'Environment', value: 'Production' }, { label: 'Mode', value: 'Sovereign (Local)' }, { label: 'Services', value: `${servicesUp}/${servicesTotal}` },
+                ].map((item) => <div key={item.label} className="bg-surface-overlay rounded-lg p-3 border border-surface-border"><p className="text-[10px] text-neutral-500 uppercase tracking-wider">{item.label}</p><p className="text-xs font-medium text-neutral-200 mt-0.5">{item.value}</p></div>)}</div>
+              </div>
+              <div className="bg-surface-raised border border-surface-border rounded-xl p-5">
+                <h2 className="text-sm font-semibold text-white mb-3">Quick Actions</h2>
+                <div className="grid grid-cols-2 gap-2">
+                  <Link to="/chat" className="flex items-center justify-center gap-2 px-3 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">New Chat</Link>
+                  <Link to="/knowledge" className="flex items-center justify-center gap-2 px-3 py-2.5 bg-surface-overlay hover:bg-surface-muted text-neutral-300 rounded-lg text-xs font-medium transition-colors border border-surface-border">Knowledge Bases</Link>
+                  <Link to="/models" className="flex items-center justify-center gap-2 px-3 py-2.5 bg-surface-overlay hover:bg-surface-muted text-neutral-300 rounded-lg text-xs font-medium transition-colors border border-surface-border">Browse Models</Link>
+                  <Link to="/providers" className="flex items-center justify-center gap-2 px-3 py-2.5 bg-surface-overlay hover:bg-surface-muted text-neutral-300 rounded-lg text-xs font-medium transition-colors border border-surface-border">Providers</Link>
+                </div>
+              </div>
+              <div className="bg-surface-raised border border-surface-border rounded-xl p-5">
+                <h2 className="text-sm font-semibold text-white mb-3">Resource Usage</h2>
+                <LiveLineChart lines={[{ data: [cpuCurrent], color: '#22d3ee', label: 'CPU' }, { data: [ramCurrent], color: '#5a7fd9', label: 'RAM' }]} />
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
