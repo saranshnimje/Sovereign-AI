@@ -4,6 +4,12 @@ import { authApi, DemoUser } from '../api/auth'
 import { useAuthStore } from '../stores/authStore'
 import SovereignLogo from '../components/ui/SovereignLogo'
 
+const DEMO_ADMIN = {
+  username: 'admin',
+  email: 'admin@admin.com',
+  password: 'admin12345678',
+}
+
 export default function LoginPage() {
   const navigate = useNavigate()
   const { setToken, setUser, accessToken } = useAuthStore()
@@ -72,12 +78,20 @@ export default function LoginPage() {
     setError('')
   }
 
+  // One-click SIH demo account autofill. Does NOT submit the form.
+  const fillDemoAdmin = () => {
+    setEmail(DEMO_ADMIN.email)
+    setPassword(DEMO_ADMIN.password)
+    setUsername(DEMO_ADMIN.username)
+    setFieldErrors({})
+    setError('')
+  }
+
   const inputCls = (hasError?: string) =>
     `w-full rounded-lg border ${hasError ? 'border-danger-500 focus:ring-danger-500' : 'border-surface-border focus:ring-cyan-500 focus:border-cyan-500'} bg-surface px-3 py-2.5 text-sm text-neutral-200 placeholder-neutral-600 shadow-sm focus:outline-none focus:ring-2 transition-colors`
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-navy-950 p-4">
-      {/* Background decoration */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-cyan-500/5 rounded-full blur-3xl" />
         <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-navy-500/10 rounded-full blur-3xl" />
@@ -159,6 +173,18 @@ export default function LoginPage() {
           {!setupMode && (
             <>
               <p className="text-xs text-neutral-500 text-center mt-4">New here? Contact your administrator to get an account.</p>
+
+              <div className="mt-6 border-t border-surface-border pt-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <h3 className="text-sm font-semibold text-neutral-300">SIH Demo Admin</h3>
+                  <span className="text-[10px] uppercase tracking-wider bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 rounded px-1.5 py-0.5">Demo</span>
+                </div>
+                <p className="text-xs text-neutral-500 mb-3">Autofill the admin credentials for your SIH presentation. This only fills the form; it does not sign in automatically.</p>
+                <button type="button" onClick={fillDemoAdmin}
+                  className="w-full border border-cyan-500/40 text-cyan-400 rounded-lg py-2.5 px-4 text-sm font-medium hover:bg-cyan-500/10 hover:text-cyan-300 transition-colors">
+                  Fill Demo Admin Credentials
+                </button>
+              </div>
 
               <div className="mt-6 border-t border-surface-border pt-5">
                 <div className="flex items-center gap-2 mb-3">
