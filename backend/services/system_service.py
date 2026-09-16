@@ -12,43 +12,32 @@ from config import get_settings
 from schemas.system import ResourceMetrics, ServiceStatus, SystemStatus
 
 logger = logging.getLogger(__name__)
-
-# Simple in-process cache: (data, expiry_timestamp)
 _status_cache: tuple[SystemStatus, float] | None = None
-_STATUS_TTL = 5.0  # seconds
+_STATUS_TTL = 5.0
 
 
 async def get_system_status() -> SystemStatus:
-    """Return cached system status (refreshed every 5 seconds)."""
     global _status_cache
     now = time.monotonic()
-
     if _status_cache and now < _status_cache[1]:
         return _status_cache[0]
 
     settings = get_settings()
     services: dict[str, ServiceStatus] = {}
 
-    # --- Check actual configured LLM providers ---
     try:
         from database import AsyncSessionLocal
         from models.provider import LLMProvider
+        from models.provider_model import ProviderModel
 
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(LLMProvider).where(LLMProvider.enabled == True)  # noqa: E712
-            )
+            result = await db.execute(select(LLMProvider).where(LLMProvider.enabled == True))  # noqa: E712
             providers = result.scalars().all()
-
             if not providers:
                 services["llm"] = ServiceStatus(status="down", detail="Offline")
             else:
-                # Check each provider's health
                 from services.llm_client import build_provider
-
                 healthy_count = 0
-                total = len(providers)
-
                 for p in providers:
                     try:
                         custom_h = None
@@ -57,79 +46,44 @@ async def get_system_status() -> SystemStatus:
                                 custom_h = json.loads(p.custom_headers) if isinstance(p.custom_headers, str) else p.custom_headers
                             except (json.JSONDecodeError, TypeError):
                                 pass
-
-                        client = build_provider(
-                            provider_type=p.provider_type,
-                            base_url=p.base_url,
-                            api_key=p.api_key,
-                            custom_headers=custom_h,
-                        )
-                        reachable, latency = await client.health_check(None)
+                        client = build_provider(provider_type=p.provider_type, base_url=p.base_url, api_key=p.api_key, custom_headers=custom_h)
+                        reachable, _latency = await client.health_check(None)
                         if reachable:
                             healthy_count += 1
                     except Exception:
                         pass
 
-                # Fallback: if health check failed but provider has models stored, treat as online
                 if healthy_count == 0:
-                    from models.provider import ProviderModel
                     model_result = await db.execute(
                         select(ProviderModel).where(
                             ProviderModel.provider_id.in_([p.id for p in providers]),
                             ProviderModel.status == "available",
+                            ProviderModel.enabled == True,  # noqa: E712
                         )
                     )
                     if model_result.scalars().first():
                         healthy_count = 1
 
-                services["llm"] = ServiceStatus(
-                    status="up" if healthy_count > 0 else "down",
-                    detail="Online" if healthy_count > 0 else "Offline",
-                )
-
+                services["llm"] = ServiceStatus(status="up" if healthy_count else "down", detail="Online" if healthy_count else "Offline")
     except Exception as exc:
         logger.warning("Failed to check LLM providers: %s", exc)
         services["llm"] = ServiceStatus(status="down", detail=str(exc)[:120])
 
-    # --- Qdrant health ---
     try:
         t0 = time.monotonic()
-        qdrant_headers = {}
-        if settings.qdrant_api_key:
-            qdrant_headers["api-key"] = settings.qdrant_api_key
+        qdrant_headers = {"api-key": settings.qdrant_api_key} if settings.qdrant_api_key else {}
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(settings.qdrant_url + "/healthz", headers=qdrant_headers)
-        latency = int((time.monotonic() - t0) * 1000)
-        services["qdrant"] = ServiceStatus(
-            status="up" if resp.status_code == 200 else "down", latency_ms=latency
-        )
+        services["qdrant"] = ServiceStatus(status="up" if resp.status_code == 200 else "down", latency_ms=int((time.monotonic() - t0) * 1000))
     except Exception as exc:
         services["qdrant"] = ServiceStatus(status="down", detail=str(exc)[:120])
 
-    # --- Database is always "up" if we got this far ---
     services["database"] = ServiceStatus(status="up")
-
-    # --- Resource metrics ---
     resources = _get_resource_metrics()
-
-    # --- Loaded models (currently running in memory) ---
     models_loaded: list[str] = []
-
-    # Determine overall health
     down_count = sum(1 for s in services.values() if s.status == "down")
-    if down_count == 0:
-        overall = "healthy"
-    elif down_count < len(services):
-        overall = "degraded"
-    else:
-        overall = "unhealthy"
-
-    status = SystemStatus(
-        status=overall,
-        services=services,
-        resources=resources,
-        models_loaded=models_loaded,
-    )
+    overall = "healthy" if down_count == 0 else "degraded" if down_count < len(services) else "unhealthy"
+    status = SystemStatus(status=overall, services=services, resources=resources, models_loaded=models_loaded)
     _status_cache = (status, time.monotonic() + _STATUS_TTL)
     return status
 
@@ -139,19 +93,6 @@ def _get_resource_metrics() -> ResourceMetrics:
         cpu = psutil.cpu_percent(interval=0.1)
         vm = psutil.virtual_memory()
         disk = psutil.disk_usage("/")
-        return ResourceMetrics(
-            cpu_percent=round(cpu, 1),
-            ram_used_gb=round(vm.used / (1024**3), 2),
-            ram_total_gb=round(vm.total / (1024**3), 2),
-            disk_used_gb=round(disk.used / (1024**3), 1),
-            disk_total_gb=round(disk.total / (1024**3), 1),
-            gpu_available=False,
-        )
+        return ResourceMetrics(cpu_percent=cpu, memory_percent=vm.percent, disk_percent=disk.percent)
     except Exception:
-        return ResourceMetrics(
-            cpu_percent=0.0,
-            ram_used_gb=0.0,
-            ram_total_gb=0.0,
-            disk_used_gb=0.0,
-            disk_total_gb=0.0,
-        )
+        return ResourceMetrics()
