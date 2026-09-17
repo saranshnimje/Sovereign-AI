@@ -80,4 +80,14 @@ export const knowledgeBasesApi = {
     const blob = new Blob([response.data])
     return URL.createObjectURL(blob)
   },
+
+  /**
+   * Get raw ArrayBuffer for a document (for DOCX conversion etc.).
+   */
+  getDocumentBlob: async (docId: string): Promise<ArrayBuffer> => {
+    const response = await api.get(`/documents/${docId}/download`, {
+      responseType: 'arraybuffer',
+    })
+    return response.data
+  },
 }

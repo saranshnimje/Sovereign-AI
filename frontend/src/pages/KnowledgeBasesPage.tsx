@@ -3,7 +3,7 @@ import { knowledgeBasesApi, KnowledgeBase, Document } from '../api/knowledgeBase
 import { useAuthStore } from '../stores/authStore'
 import { useUIStore } from '../stores/uiStore'
 import Badge from '../components/ui/Badge'
-import DocumentPreviewSafeModal from '../components/documents/DocumentPreviewSafeModal'
+import DocumentPreviewModal from '../components/documents/DocumentPreviewModal'
 
 export default function KnowledgeBasesPage() {
   const { user } = useAuthStore()
@@ -243,7 +243,7 @@ export default function KnowledgeBasesPage() {
       )}
 
       {previewDoc && (
-        <DocumentPreviewSafeModal document={previewDoc} onClose={() => setPreviewDoc(null)} />
+        <DocumentPreviewModal document={previewDoc} onClose={() => setPreviewDoc(null)} />
       )}
     </div>
   )
