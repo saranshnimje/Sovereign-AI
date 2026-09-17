@@ -71,6 +71,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.get("/health")
+    async def health_check():
+        """Lightweight public health check for uptime monitoring."""
+        return {"status": "ok"}
+
     configured_origins = settings.frontend_origins.strip() or settings.frontend_origin.strip()
     frontend_origins = [origin.strip().rstrip("/") for origin in configured_origins.split(",") if origin.strip()]
     dev_origins = [] if is_production else ["http://localhost:5173", "http://localhost"]
