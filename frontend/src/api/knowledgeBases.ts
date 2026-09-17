@@ -40,8 +40,6 @@ export interface DocumentPreview {
   binary?: boolean
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || ''
-
 export const knowledgeBasesApi = {
   list: () => api.get<KnowledgeBase[]>('/knowledge-bases/').then(r => r.data),
   get: (id: string) => api.get<KnowledgeBase>(`/knowledge-bases/${id}`).then(r => r.data),
@@ -58,8 +56,28 @@ export const knowledgeBasesApi = {
   deleteDocument: (kbId: string, docId: string) => api.delete(`/knowledge-bases/${kbId}/documents/${docId}`),
   previewDocument: (docId: string) =>
     api.get<DocumentPreview>(`/documents/${docId}/preview`).then(r => r.data),
-  downloadDocumentUrl: (docId: string): string => {
-    const token = localStorage.getItem('access_token') || ''
-    return `${API_BASE}/api/v1/documents/${docId}/download?token=${token}`
+
+  /**
+   * Download a document as a blob through the authenticated API client.
+   * Returns a blob URL that the caller must revoke after use.
+   */
+  downloadDocument: async (docId: string, filename: string): Promise<string> => {
+    const response = await api.get(`/documents/${docId}/download`, {
+      responseType: 'blob',
+    })
+    const blob = new Blob([response.data])
+    return URL.createObjectURL(blob)
+  },
+
+  /**
+   * Get an authenticated blob URL for inline preview (PDF, images).
+   * Returns a blob URL that the caller must revoke after use.
+   */
+  getPreviewBlobUrl: async (docId: string): Promise<string> => {
+    const response = await api.get(`/documents/${docId}/download`, {
+      responseType: 'blob',
+    })
+    const blob = new Blob([response.data])
+    return URL.createObjectURL(blob)
   },
 }

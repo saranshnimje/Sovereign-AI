@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { knowledgeBasesApi, Document, DocumentPreview } from '../../api/knowledgeBases'
@@ -27,6 +27,16 @@ export default function DocumentPreviewSafeModal({ document: doc, onClose }: Pro
   const [preview, setPreview] = useState<DocumentPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const blobUrlRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current)
+        blobUrlRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (doc.status === 'pending' || doc.status === 'processing') return
@@ -45,11 +55,19 @@ export default function DocumentPreviewSafeModal({ document: doc, onClose }: Pro
     return () => { cancelled = true }
   }, [doc.id, doc.status])
 
-  const download = () => {
-    const token = localStorage.getItem('access_token') || ''
-    const url = knowledgeBasesApi.downloadDocumentUrl(doc.id)
-    const finalUrl = token ? url : url.replace('?token=', '?token=')
-    window.open(finalUrl, '_blank', 'noopener,noreferrer')
+  const download = async () => {
+    try {
+      const url = await knowledgeBasesApi.downloadDocument(doc.id, doc.original_name)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = doc.original_name
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch {
+      setError('Download failed. Please try again.')
+    }
   }
 
   const renderContent = () => {

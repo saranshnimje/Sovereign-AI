@@ -308,6 +308,24 @@ class GeminiProvider(BaseLLMProvider):
                         except Exception: continue
         except (httpx.ConnectError,httpx.TimeoutException) as exc: raise ModelUnavailableError(str(exc)) from exc
 
+    async def embed(self, model: str, texts: list[str]) -> EmbeddingResponse:
+        """Gemini embedding via batchEmbedContents endpoint."""
+        url = f"/v1beta/models/{model}:batchEmbedContents?key={self._api_key}"
+        payload = {
+            "requests": [
+                {"model": f"models/{model}", "content": {"parts": [{"text": t}]}}
+                for t in texts
+            ]
+        }
+        resp = await self._retry_request(
+            lambda: self._get_client().post(url, json=payload)
+        )
+        data = resp.json()
+        embeddings = [item["embedding"]["values"] for item in data.get("embeddings", [])]
+        if not embeddings:
+            raise ModelUnavailableError("Gemini embedding returned no vectors")
+        return EmbeddingResponse(embeddings=embeddings, model=model, tokens=0)
+
     async def health_check(self,model=None):
         import time
         try:
@@ -374,6 +392,17 @@ class CohereProvider(BaseLLMProvider):
         data=(await self._retry_request(lambda:self._get_client().post("/chat",json=payload,headers=self._headers()))).json(); text=data.get("message",{}).get("content",[{"text":""}])[0].get("text",""); usage=data.get("usage",{}).get("tokens",{})
         return ChatResponse(content=text,model=model,prompt_tokens=usage.get("input_tokens",0),completion_tokens=usage.get("output_tokens",0),total_tokens=usage.get("input_tokens",0)+usage.get("output_tokens",0),finish_reason=data.get("stop_reason","END_TURN"))
     async def _stream_chat(self,model,payload): return
+    async def embed(self, model: str, texts: list[str]) -> EmbeddingResponse:
+        """Cohere embedding via v1/embed endpoint."""
+        payload = {"model": model, "texts": texts, "input_type": "search_document"}
+        data = (await self._retry_request(
+            lambda: self._get_client().post("/v1/embed", json=payload, headers=self._headers())
+        )).json()
+        embeddings = data.get("embeddings", [])
+        if not embeddings:
+            raise ModelUnavailableError("Cohere embedding returned no vectors")
+        return EmbeddingResponse(embeddings=embeddings, model=model, tokens=data.get("meta", {}).get("billed_units", {}).get("input_tokens", 0))
+
     async def health_check(self,model=None):
         import time
         try:t0=time.monotonic();resp=await self._get_client().get("/models",headers=self._headers(),timeout=5.0);return resp.status_code<500,int((time.monotonic()-t0)*1000)

@@ -122,6 +122,20 @@ class EmbeddingService:
 
         return candidates
 
+    # Provider-specific embedding model fallbacks: when the KB's configured
+    # model is not available on a cloud provider, try these in order.
+    _CLOUD_MODEL_FALLBACKS: dict[str, list[str]] = {
+        "openrouter": ["openai/text-embedding-3-small", "openai/text-embedding-ada-002"],
+        "openai": ["text-embedding-3-small", "text-embedding-ada-002"],
+        "openai_compatible": ["text-embedding-3-small"],
+        "groq": ["text-embedding-3-small"],
+        "together": ["togethercomputer/mpnet-base-v2"],
+        "nvidia": ["NV-Embed-QA"],
+        "mistral": ["mistral-embed"],
+        "cohere": ["embed-english-v3.0"],
+        "huggingface": ["sentence-transformers/all-MiniLM-L6-v2"],
+    }
+
     async def _cloud_embed(self, model: str, texts: list[str]) -> list[list[float]]:
         """Use OpenAI-compatible embeddings for configured cloud providers."""
         import httpx
@@ -138,26 +152,43 @@ class EmbeddingService:
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
 
-            request_model = model
-            if label.lower().find("openrouter") >= 0 and model.startswith("text-embedding-"):
-                request_model = f"openai/{model}"
+            # Determine model name variants to try for this provider
+            label_lower = label.lower()
+            model_variants: list[str] = [model]
+            for provider_key, fallbacks in self._CLOUD_MODEL_FALLBACKS.items():
+                if provider_key in label_lower:
+                    for fb in fallbacks:
+                        if fb not in model_variants:
+                            model_variants.append(fb)
+                    break
 
-            try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    resp = await client.post(
-                        url,
-                        json={"model": request_model, "input": texts},
-                        headers=headers,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                embeddings = [item["embedding"] for item in data.get("data", [])]
-                if not embeddings:
-                    raise ModelUnavailableError("Embedding provider returned no vectors")
-                return embeddings
-            except Exception as exc:
-                errors.append(f"{label}: {exc}")
-                continue
+            # For OpenRouter, prefix OpenAI models
+            if "openrouter" in label_lower:
+                model_variants = [
+                    f"openai/{m}" if m.startswith("text-embedding-") else m
+                    for m in model_variants
+                ]
+
+            provider_errors: list[str] = []
+            for request_model in model_variants:
+                try:
+                    async with httpx.AsyncClient(timeout=120.0) as client:
+                        resp = await client.post(
+                            url,
+                            json={"model": request_model, "input": texts},
+                            headers=headers,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                    embeddings = [item["embedding"] for item in data.get("data", [])]
+                    if not embeddings:
+                        raise ModelUnavailableError("Embedding provider returned no vectors")
+                    return embeddings
+                except Exception as exc:
+                    provider_errors.append(f"{request_model}: {exc}")
+                    continue
+
+            errors.append(f"{label}: {'; '.join(provider_errors[-3:])}")
 
         raise ModelUnavailableError("All cloud embedding providers failed. " + " | ".join(errors[-4:]))
 

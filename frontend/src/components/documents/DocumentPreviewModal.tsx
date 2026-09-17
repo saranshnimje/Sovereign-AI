@@ -3,8 +3,6 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { knowledgeBasesApi, Document, DocumentPreview } from '../../api/knowledgeBases'
 
-const API_BASE = import.meta.env.VITE_API_URL || ''
-
 interface DocumentPreviewModalProps {
   document: Document
   onClose: () => void
@@ -107,26 +105,32 @@ function parseCsv(content: string): string[][] {
   return lines.map(parseCsvLine)
 }
 
-function getDownloadUrl(docId: string): string {
-  const token = localStorage.getItem('access_token') || ''
-  return `${API_BASE}/api/v1/documents/${docId}/download?token=${token}`
-}
-
 export default function DocumentPreviewModal({ document: doc, onClose }: DocumentPreviewModalProps) {
   const [preview, setPreview] = useState<DocumentPreview | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [zoom, setZoom] = useState(1)
+  const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
+  const blobUrlsRef = useRef<string[]>([])
 
   const kind = detectKind(doc.original_name, doc.mime_type)
-  const downloadUrl = getDownloadUrl(doc.id)
+
+  useEffect(() => {
+    return () => {
+      blobUrlsRef.current.forEach(url => URL.revokeObjectURL(url))
+      blobUrlsRef.current = []
+    }
+  }, [])
 
   const loadContent = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
       if (kind === 'pdf' || kind === 'image') {
+        const blobUrl = await knowledgeBasesApi.getPreviewBlobUrl(doc.id)
+        blobUrlsRef.current.push(blobUrl)
+        setPreviewBlobUrl(blobUrl)
         setPreview({ content: null, filename: doc.original_name, mime_type: doc.mime_type, truncated: false, binary: true })
       } else {
         const data = await knowledgeBasesApi.previewDocument(doc.id)
@@ -150,11 +154,19 @@ export default function DocumentPreviewModal({ document: doc, onClose }: Documen
     if (e.target === overlayRef.current) onClose()
   }
 
-  const handleDownload = () => {
-    const a = document.createElement('a')
-    a.href = downloadUrl
-    a.download = doc.original_name
-    a.click()
+  const handleDownload = async () => {
+    try {
+      const url = await knowledgeBasesApi.downloadDocument(doc.id, doc.original_name)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = doc.original_name
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch {
+      setError('Download failed. Please try again.')
+    }
   }
 
   const zoomIn = () => setZoom(z => Math.min(z + 0.25, 3))
@@ -188,11 +200,15 @@ export default function DocumentPreviewModal({ document: doc, onClose }: Documen
       case 'pdf':
         return (
           <div className="w-full h-[80vh]">
-            <iframe
-              src={`${downloadUrl}#toolbar=1`}
-              className="w-full h-full rounded-lg border border-surface-border"
-              title={doc.original_name}
-            />
+            {previewBlobUrl ? (
+              <iframe
+                src={`${previewBlobUrl}#toolbar=1`}
+                className="w-full h-full rounded-lg border border-surface-border"
+                title={doc.original_name}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-neutral-400">Loading PDF...</div>
+            )}
           </div>
         )
 
@@ -205,12 +221,16 @@ export default function DocumentPreviewModal({ document: doc, onClose }: Documen
               <button onClick={zoomIn} className="px-2 py-1 text-xs bg-surface-overlay border border-surface-border rounded text-neutral-400 hover:text-neutral-200">+</button>
             </div>
             <div className="overflow-auto max-h-[75vh] rounded-lg border border-surface-border bg-surface p-2">
-              <img
-                src={downloadUrl}
-                alt={doc.original_name}
-                style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}
-                className="max-w-none transition-transform"
-              />
+              {previewBlobUrl ? (
+                <img
+                  src={previewBlobUrl}
+                  alt={doc.original_name}
+                  style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}
+                  className="max-w-none transition-transform"
+                />
+              ) : (
+                <div className="text-neutral-400 text-sm">Loading image...</div>
+              )}
             </div>
           </div>
         )
