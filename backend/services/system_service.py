@@ -90,7 +90,6 @@ async def _refresh_system_status() -> SystemStatus:
     except Exception as exc:
         logger.warning("Failed to load LLM providers/models: %s", exc)
 
-    # Keep the dashboard compact while preserving the total model count.
     models_loaded = all_models[:_MAX_DASHBOARD_MODELS]
     if len(all_models) > _MAX_DASHBOARD_MODELS:
         models_loaded.append(f"+{len(all_models) - _MAX_DASHBOARD_MODELS} more models")
