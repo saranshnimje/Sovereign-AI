@@ -117,6 +117,7 @@ export default function AppShell() {
   const navigate = useNavigate()
   const [status, setStatus] = useState<SystemStatus | null>(null)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
 
   const role = user?.role ?? 'viewer'
   const navItems = NAV_ITEMS.filter((n) => n.roles.includes(role))
@@ -130,10 +131,19 @@ export default function AppShell() {
     return () => clearInterval(id)
   }, [])
 
-  // Close mobile drawer on route change
   useEffect(() => {
     setMobileMenuOpen(false)
+    setNotificationsOpen(false)
   }, [location.pathname])
+
+  useEffect(() => {
+    if (!notificationsOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setNotificationsOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [notificationsOpen])
 
   const handleLogout = async () => {
     try { await authApi.logout() } catch { /* ignore */ }
@@ -151,69 +161,32 @@ export default function AppShell() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-navy-950">
-      {/* ── Mobile backdrop ───────────────────────────────────── */}
       {mobileMenuOpen && (
-        <div
-          className="fixed inset-0 bg-black/50 z-30 md:hidden"
-          onClick={closeMobileMenu}
-          aria-hidden="true"
-        />
+        <div className="fixed inset-0 bg-black/50 z-30 md:hidden" onClick={closeMobileMenu} aria-hidden="true" />
       )}
 
-      {/* ── Sidebar ──────────────────────────────────────────── */}
-      {/* Desktop sidebar */}
-      <aside
-        className={`${sidebarOpen ? 'w-60' : 'w-16'} hidden md:flex flex-shrink-0 bg-surface border-r border-surface-border flex-col transition-all duration-200 z-30`}
-        aria-label="Sidebar navigation"
-      >
-        <SidebarContent
-          sidebarOpen={sidebarOpen}
-          status={status}
-          user={user}
-          navItems={navItems}
-          location={location}
-          onLogout={handleLogout}
-        />
+      <aside className={`${sidebarOpen ? 'w-60' : 'w-16'} hidden md:flex flex-shrink-0 bg-surface border-r border-surface-border flex-col transition-all duration-200 z-30`} aria-label="Sidebar navigation">
+        <SidebarContent sidebarOpen={sidebarOpen} status={status} user={user} navItems={navItems} location={location} onLogout={handleLogout} />
       </aside>
 
-      {/* Mobile sidebar drawer */}
-      <aside
-        className={`fixed inset-y-0 left-0 w-64 bg-surface border-r border-surface-border flex flex-col transition-transform duration-200 z-40 md:hidden ${
-          mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
-        aria-label="Sidebar navigation"
-      >
-        <SidebarContent
-          sidebarOpen={true}
-          status={status}
-          user={user}
-          navItems={navItems}
-          location={location}
-          onLogout={handleLogout}
-        />
+      <aside className={`fixed inset-y-0 left-0 w-64 bg-surface border-r border-surface-border flex flex-col transition-transform duration-200 z-40 md:hidden ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`} aria-label="Sidebar navigation">
+        <SidebarContent sidebarOpen={true} status={status} user={user} navItems={navItems} location={location} onLogout={handleLogout} />
       </aside>
 
-      {/* ── Main area ────────────────────────────────────────── */}
       <div className="flex flex-col flex-1 overflow-hidden min-w-0">
-        {/* Top bar */}
         <header className="h-14 flex items-center gap-2 px-3 md:px-4 bg-surface/80 backdrop-blur-sm border-b border-surface-border z-20 flex-shrink-0">
-          {/* Mobile hamburger */}
-          <button onClick={toggleMobileMenu}
-            className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors md:hidden" aria-label="Toggle navigation">
+          <button onClick={toggleMobileMenu} className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors md:hidden" aria-label="Toggle navigation">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
             </svg>
           </button>
 
-          {/* Desktop hamburger */}
-          <button onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors hidden md:block" aria-label="Toggle sidebar">
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors hidden md:block" aria-label="Toggle sidebar">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d={sidebarOpen ? "M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" : "M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5"} />
             </svg>
           </button>
 
-          {/* Search bar — hidden on mobile */}
           <div className="hidden md:flex items-center flex-1 max-w-md mx-4">
             <div className="flex items-center gap-2 w-full px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-neutral-500 text-sm">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -227,18 +200,59 @@ export default function AppShell() {
           <div className="ml-auto flex items-center gap-2 md:gap-3">
             <StatusPill />
 
-            {/* Notifications */}
-            <button className="relative p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
-              </svg>
-              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-cyan-500 rounded-full" />
-            </button>
+            <div className="relative">
+              <button
+                onClick={() => setNotificationsOpen(prev => !prev)}
+                className="relative p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors"
+                aria-label="Notifications"
+                aria-expanded={notificationsOpen}
+                aria-haspopup="true"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                </svg>
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-cyan-500 rounded-full" />
+              </button>
 
-            {/* Dark mode */}
-            <button onClick={toggleDarkMode}
-              className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors"
-              aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
+              {notificationsOpen && (
+                <div className="absolute right-0 top-full mt-2 w-80 max-w-[calc(100vw-1.5rem)] bg-surface border border-surface-border rounded-xl shadow-2xl overflow-hidden z-50">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border">
+                    <div>
+                      <h3 className="text-sm font-semibold text-neutral-200">Notifications</h3>
+                      <p className="text-[10px] text-neutral-500 mt-0.5">System activity and actions</p>
+                    </div>
+                    <span className="text-[10px] text-success-500">Online</span>
+                  </div>
+
+                  <div className="p-3">
+                    <div className="flex items-start gap-3 p-3 rounded-lg bg-surface-raised border border-surface-border">
+                      <div className="w-8 h-8 rounded-full bg-cyan-500/10 text-cyan-400 flex items-center justify-center flex-shrink-0">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs text-neutral-200">Sovereign AI Workbench is active</p>
+                        <p className="text-[10px] text-neutral-500 mt-1">No new notifications right now.</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="px-3 pb-3 flex gap-2">
+                    {navItems.some(item => item.to === '/approvals') && (
+                      <Link to="/approvals" onClick={() => setNotificationsOpen(false)} className="flex-1 text-center text-xs px-3 py-2 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-colors">
+                        Open Approvals
+                      </Link>
+                    )}
+                    <button onClick={() => setNotificationsOpen(false)} className="text-xs px-3 py-2 rounded-lg border border-surface-border text-neutral-400 hover:text-neutral-200 hover:bg-surface-muted transition-colors">
+                      Close
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <button onClick={toggleDarkMode} className="p-1.5 rounded-lg text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 transition-colors" aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
               {darkMode ? (
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" />
@@ -250,7 +264,6 @@ export default function AppShell() {
               )}
             </button>
 
-            {/* User */}
             {user && (
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-full bg-gradient-to-br from-cyan-600 to-cyan-800 flex items-center justify-center text-xs text-white font-medium border border-cyan-500/30">
@@ -265,7 +278,6 @@ export default function AppShell() {
           </div>
         </header>
 
-        {/* Page content */}
         <main className="flex-1 overflow-y-auto p-3 md:p-6 bg-navy-950">
           <div className="max-w-7xl mx-auto">
             <Outlet />
@@ -289,7 +301,6 @@ function SidebarContent({ sidebarOpen, status, user, navItems, location, onLogou
 }) {
   return (
     <>
-      {/* Logo */}
       <div className="flex items-center gap-3 px-4 py-4 border-b border-surface-border">
         <SovereignLogo size={32} animate={true} className="flex-shrink-0" />
         {sidebarOpen && (
@@ -300,20 +311,13 @@ function SidebarContent({ sidebarOpen, status, user, navItems, location, onLogou
         )}
       </div>
 
-      {/* Nav */}
       <nav className="flex-1 py-3 overflow-y-auto px-2" aria-label="Main navigation">
         <div className="space-y-0.5">
           {navItems.map((item) => {
             const active = location.pathname === item.to || (item.to !== '/' && location.pathname.startsWith(item.to))
             const Icon = item.icon
             return (
-              <Link key={item.to} to={item.to}
-                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all
-                  ${active
-                    ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
-                    : 'text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 border border-transparent'
-                  }`}
-                aria-current={active ? 'page' : undefined}>
+              <Link key={item.to} to={item.to} className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all ${active ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20' : 'text-neutral-500 hover:bg-surface-muted hover:text-neutral-300 border border-transparent'}`} aria-current={active ? 'page' : undefined}>
                 <span className="flex-shrink-0"><Icon active={active} /></span>
                 {sidebarOpen && <span className="truncate">{item.label}</span>}
               </Link>
@@ -322,44 +326,33 @@ function SidebarContent({ sidebarOpen, status, user, navItems, location, onLogou
         </div>
       </nav>
 
-      {/* Bottom */}
       {sidebarOpen && (
         <div className="px-3 py-3 border-t border-surface-border space-y-3">
-          {/* Status card */}
           <div className="bg-surface-overlay rounded-lg p-3 border border-surface-border">
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full ${status?.status === 'healthy' ? 'bg-success-500' : status?.status === 'degraded' ? 'bg-warning-500' : 'bg-danger-500'}`} />
-              <p className="text-[10px] text-neutral-400 font-medium">
-                {status?.status === 'healthy' ? 'All Systems Operational' : status?.status === 'degraded' ? 'Degraded' : 'Checking...'}
-              </p>
+              <p className="text-[10px] text-neutral-400 font-medium">{status?.status === 'healthy' ? 'All Systems Operational' : status?.status === 'degraded' ? 'Degraded' : 'Checking...'}</p>
             </div>
             {status?.services && (
               <div className="mt-2 space-y-1">
                 {Object.entries(status.services).map(([name, svc]) => (
                   <div key={name} className="flex items-center justify-between">
                     <span className="text-[9px] text-neutral-500">{name === 'llm' ? 'LLM' : name.charAt(0).toUpperCase() + name.slice(1)}</span>
-                    <span className={`text-[9px] ${svc.status === 'up' ? 'text-success-500' : 'text-danger-500'}`}>
-                      {svc.status === 'up' ? (svc.detail || 'Online') : 'Offline'}
-                    </span>
+                    <span className={`text-[9px] ${svc.status === 'up' ? 'text-success-500' : 'text-danger-500'}`}>{svc.status === 'up' ? (svc.detail || 'Online') : 'Offline'}</span>
                   </div>
                 ))}
               </div>
             )}
           </div>
 
-          {/* User info */}
           {user && (
             <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-600 to-cyan-800 flex items-center justify-center text-xs text-white font-medium flex-shrink-0 border border-cyan-500/30">
-                {(user.username || user.email || 'U')[0].toUpperCase()}
-              </div>
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-600 to-cyan-800 flex items-center justify-center text-xs text-white font-medium flex-shrink-0 border border-cyan-500/30">{(user.username || user.email || 'U')[0].toUpperCase()}</div>
               <div className="min-w-0 flex-1">
                 <div className="text-xs text-neutral-200 truncate">{user.username || user.email}</div>
                 <div className="text-[10px] text-cyan-500 capitalize">{user.role}</div>
               </div>
-              <button onClick={onLogout} className="text-[10px] text-neutral-500 hover:text-danger-500 px-1.5 py-0.5 rounded transition-colors">
-                Logout
-              </button>
+              <button onClick={onLogout} className="text-[10px] text-neutral-500 hover:text-danger-500 px-1.5 py-0.5 rounded transition-colors">Logout</button>
             </div>
           )}
         </div>
