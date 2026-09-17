@@ -43,15 +43,9 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialised")
 
-    # Optional SIH demo content. Idempotent: existing demo records are preserved.
-    # Disabled by default so normal deployments never receive synthetic data.
-    if os.getenv("SEED_DEMO_DATA", "false").strip().lower() in {"1", "true", "yes"}:
-        try:
-            from scripts.seed_demo_content import seed as seed_demo_content
-            await seed_demo_content()
-            logger.info("SIH demo content seeded")
-        except Exception:
-            logger.exception("SIH demo content seeding failed")
+    # Demo content is intentionally NOT seeded during application startup.
+    # The seed script remains available for deliberate/manual SIH demo setup,
+    # but production restarts must never recreate records that an admin deleted.
 
     # Default Ollama provider seeding remains disabled; users configure providers manually.
     yield
