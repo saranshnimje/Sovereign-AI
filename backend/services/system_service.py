@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _status_cache: tuple[SystemStatus, float] | None = None
 _status_refresh_task: asyncio.Task[SystemStatus] | None = None
 _STATUS_TTL = 10.0
+_MAX_DASHBOARD_MODELS = 4
 
 
 async def get_system_status() -> SystemStatus:
@@ -43,11 +44,8 @@ async def _refresh_system_status() -> SystemStatus:
     settings = get_settings()
     services: dict[str, ServiceStatus] = {}
     providers: list[dict] = []
-    models_loaded: list[str] = []
+    all_models: list[str] = []
 
-    # Read provider configuration and the enabled/available model catalog in
-    # one short DB scope. This is the source of truth for the dashboard model
-    # list; network health checks happen only after the connection is released.
     try:
         from database import AsyncSessionLocal
         from models.provider import LLMProvider
@@ -73,7 +71,7 @@ async def _refresh_system_status() -> SystemStatus:
                     name = (display_name or model_id or "").strip()
                     if name and name not in seen_models:
                         seen_models.add(name)
-                        models_loaded.append(name)
+                        all_models.append(name)
 
             for p in enabled_providers:
                 custom_h = None
@@ -91,6 +89,11 @@ async def _refresh_system_status() -> SystemStatus:
                 })
     except Exception as exc:
         logger.warning("Failed to load LLM providers/models: %s", exc)
+
+    # Keep the dashboard compact while preserving the total model count.
+    models_loaded = all_models[:_MAX_DASHBOARD_MODELS]
+    if len(all_models) > _MAX_DASHBOARD_MODELS:
+        models_loaded.append(f"+{len(all_models) - _MAX_DASHBOARD_MODELS} more models")
 
     if not providers:
         services["llm"] = ServiceStatus(status="down", detail="Offline")
@@ -114,7 +117,6 @@ async def _refresh_system_status() -> SystemStatus:
         healthy_count = sum(result is True for result in results)
 
         if healthy_count == 0:
-            # Only touch the DB again if every external provider check failed.
             try:
                 from database import AsyncSessionLocal
                 from models.provider_model import ProviderModel
