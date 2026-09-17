@@ -24,7 +24,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Up
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
+from database import AsyncSessionLocal, get_db
 from dependencies import AnalystRequired, get_current_user, get_llm_client
 from models.user import User
 from schemas.document import DocumentStatusResponse, DocumentResponse
@@ -41,6 +41,18 @@ router = APIRouter(tags=["documents"])
 
 def _doc_service(db: AsyncSession) -> DocumentService:
     return DocumentService(db, EmbeddingService(get_llm_client()), QdrantService())
+
+
+async def _process_document_background(doc_id: str) -> None:
+    """Process a document using a fresh DB session after upload commits."""
+    async with AsyncSessionLocal() as task_db:
+        svc = _doc_service(task_db)
+        try:
+            await svc.process_document(doc_id)
+            await task_db.commit()
+        except Exception:
+            await task_db.rollback()
+            logger.exception("Background document processing failed for %s", doc_id)
 
 
 def _status_response(doc) -> DocumentStatusResponse:
@@ -71,13 +83,7 @@ async def upload_document(
     db: AsyncSession = Depends(get_db),
     _rl: None = Depends(upload_rate_limit),
 ):
-    """
-    Upload a document into a knowledge base the user may access.
-
-    Viewers get 403 (role gate); validation failures (bad extension / empty
-    file / oversize) return 422; a missing or unauthorised KB returns 404.
-    """
-    # Tenancy first — deliberate 404 for foreign/unknown KB
+    """Upload a document into a knowledge base the user may access."""
     await get_kb_checked_for_upload(db, kb_id, _user)
 
     svc = _doc_service(db)
@@ -85,7 +91,10 @@ async def upload_document(
         doc = await svc.upload_document(file, kb_id, _user.id, run_ocr=run_ocr)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    background_tasks.add_task(svc.process_document, doc.id)
+
+    await db.commit()
+    await db.refresh(doc)
+    background_tasks.add_task(_process_document_background, doc.id)
     return doc
 
 
@@ -121,7 +130,8 @@ async def retry_document(
         raise HTTPException(409, f"Document is in '{doc.status}' state; only failed docs can be retried")
     svc = _doc_service(db)
     await svc.reset_for_retry(doc_id)
-    background_tasks.add_task(svc.process_document, doc_id)
+    await db.commit()
+    background_tasks.add_task(_process_document_background, doc_id)
     return {"detail": "Retry scheduled", "doc_id": doc_id}
 
 
@@ -131,7 +141,6 @@ async def delete_document(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # get_document_checked raises 404 for missing OR foreign docs
     await get_document_checked(db, doc_id, user)
     svc = _doc_service(db)
     await svc.delete_document_checked(None, doc_id, user)
@@ -145,15 +154,8 @@ async def preview_document(
     db: AsyncSession = Depends(get_db),
     _rl: None = Depends(ai_rate_limit),
 ):
-    """
-    Return document text content for in-browser preview.
-
-    For text-based files (txt, md, csv, json, log, etc.) the raw text is
-    returned. For PDF/image/docx the caller should fall back to download.
-    Tenancy is enforced: 404 for missing OR foreign documents.
-    """
+    """Return document text content for in-browser preview."""
     doc, _kb = await get_document_checked(db, doc_id, user)
-
     if not doc.storage_path or not os.path.exists(doc.storage_path):
         raise HTTPException(404, "Document file not found on disk")
 
@@ -166,25 +168,13 @@ async def preview_document(
     if ext in text_exts or (doc.mime_type and doc.mime_type.startswith("text/")):
         try:
             with open(doc.storage_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read(512 * 1024)  # cap at 512 KB for preview
+                content = f.read(512 * 1024)
         except Exception as exc:
             logger.warning("Failed to read doc %s: %s", doc_id, exc)
             raise HTTPException(500, "Failed to read document")
-        return {
-            "content": content,
-            "filename": doc.original_name,
-            "mime_type": doc.mime_type,
-            "truncated": os.path.getsize(doc.storage_path) > 512 * 1024,
-        }
+        return {"content": content, "filename": doc.original_name, "mime_type": doc.mime_type, "truncated": os.path.getsize(doc.storage_path) > 512 * 1024}
 
-    # Non-text files: signal the frontend to use download instead
-    return {
-        "content": None,
-        "filename": doc.original_name,
-        "mime_type": doc.mime_type,
-        "truncated": False,
-        "binary": True,
-    }
+    return {"content": None, "filename": doc.original_name, "mime_type": doc.mime_type, "truncated": False, "binary": True}
 
 
 @router.get("/{doc_id}/download")
@@ -195,22 +185,12 @@ async def download_document(
     db: AsyncSession = Depends(get_db),
     _rl: None = Depends(ai_rate_limit),
 ):
-    """
-    Stream the original file for download. Tenancy enforced via 404.
-    Accepts optional ?token= query param for iframe/link-based downloads
-    where the Authorization header cannot be set (same pattern as artifacts).
-    """
+    """Stream the original file for download. Tenancy enforced via 404."""
     doc, _kb = await get_document_checked(db, doc_id, user)
-
     if not doc.storage_path or not os.path.exists(doc.storage_path):
         raise HTTPException(404, "Document file not found on disk")
-
     media_type = doc.mime_type or mimetypes.guess_type(doc.original_name)[0] or "application/octet-stream"
-    return FileResponse(
-        path=doc.storage_path,
-        filename=doc.original_name,
-        media_type=media_type,
-    )
+    return FileResponse(path=doc.storage_path, filename=doc.original_name, media_type=media_type)
 
 
 async def get_kb_checked_for_upload(db: AsyncSession, kb_id: str, user: User):
@@ -218,8 +198,8 @@ async def get_kb_checked_for_upload(db: AsyncSession, kb_id: str, user: User):
     from services.kb_access import ensure_kb_access
     from models.knowledge_base import KnowledgeBase
     from sqlalchemy import select
-
     result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     kb = result.scalar_one_or_none()
-    ensure_kb_access(kb, user, write=True)
+    if kb is None or not ensure_kb_access(user, kb, write=True):
+        raise HTTPException(404, "Knowledge base not found")
     return kb
