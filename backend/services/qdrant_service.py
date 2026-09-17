@@ -18,7 +18,6 @@ class QdrantError(Exception):
 
 def _collection_name(kb_id: str) -> str:
     """Derive a safe Qdrant collection name from a knowledge-base UUID."""
-    # Use only the UUID with kb_ prefix — never accept raw user input as collection name
     safe = kb_id.replace("-", "_")
     return f"kb_{safe}"
 
@@ -37,15 +36,25 @@ class QdrantService:
             self._client = QdrantClient(**kwargs)
         return self._client
 
-    # ------------------------------------------------------------------
-    # Collection management
-    # ------------------------------------------------------------------
+    def _ensure_payload_indexes(self, cname: str) -> None:
+        """Ensure fields used by document filtering have Qdrant payload indexes."""
+        from qdrant_client.models import PayloadSchemaType  # type: ignore
+
+        client = self._get_client()
+        for field_name in ("doc_id", "kb_id"):
+            try:
+                client.create_payload_index(
+                    collection_name=cname,
+                    field_name=field_name,
+                    field_schema=PayloadSchemaType.KEYWORD,
+                )
+            except Exception as exc:
+                # Qdrant returns an error when the index already exists; collection
+                # creation and ingestion must remain idempotent.
+                logger.debug("Payload index %s.%s already exists or could not be created: %s", cname, field_name, exc)
+
     def create_collection(self, kb_id: str, vector_size: int) -> str:
-        """
-        Create a Qdrant collection for this knowledge base.
-        Returns the collection name.
-        Idempotent — does not raise if collection already exists.
-        """
+        """Create a KB collection and ensure indexes needed for document cleanup."""
         from qdrant_client.models import Distance, VectorParams  # type: ignore
 
         cname = _collection_name(kb_id)
@@ -58,6 +67,7 @@ class QdrantService:
                     vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
                 )
                 logger.info("Created Qdrant collection: %s (dim=%d)", cname, vector_size)
+            self._ensure_payload_indexes(cname)
             return cname
         except Exception as exc:
             raise QdrantError(f"Failed to create collection '{cname}': {exc}") from exc
@@ -66,8 +76,7 @@ class QdrantService:
         """Delete the Qdrant collection for a knowledge base."""
         cname = _collection_name(kb_id)
         try:
-            client = self._get_client()
-            client.delete_collection(cname)
+            self._get_client().delete_collection(cname)
             logger.info("Deleted Qdrant collection: %s", cname)
         except Exception as exc:
             logger.warning("Could not delete collection '%s': %s", cname, exc)
@@ -80,9 +89,6 @@ class QdrantService:
         except Exception:
             return False
 
-    # ------------------------------------------------------------------
-    # Vector operations
-    # ------------------------------------------------------------------
     def upsert_vectors(
         self,
         kb_id: str,
@@ -90,22 +96,13 @@ class QdrantService:
         payloads: list[dict[str, Any]],
         ids: list[str] | None = None,
     ) -> None:
-        """
-        Insert or update vectors with payload.
-        ids: list of stable UUID strings (one per vector).
-             If None, UUIDs are generated automatically.
-        """
+        """Insert or update vectors with payload."""
         from qdrant_client.models import PointStruct  # type: ignore
 
         cname = _collection_name(kb_id)
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in vectors]
-
-        points = [
-            PointStruct(id=str(pid), vector=vec, payload=pay)
-            for pid, vec, pay in zip(ids, vectors, payloads)
-        ]
-
+        points = [PointStruct(id=str(pid), vector=vec, payload=pay) for pid, vec, pay in zip(ids, vectors, payloads)]
         try:
             self._get_client().upsert(collection_name=cname, points=points)
         except Exception as exc:
@@ -114,43 +111,23 @@ class QdrantService:
     def delete_document_vectors(self, kb_id: str, doc_id: str) -> None:
         """Delete all vectors whose payload.doc_id == doc_id."""
         from qdrant_client.models import FieldCondition, Filter, MatchValue  # type: ignore
-
         cname = _collection_name(kb_id)
         try:
-            self._get_client().delete(
-                collection_name=cname,
-                points_selector=Filter(
-                    must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
-                ),
-            )
+            if self.collection_exists(kb_id):
+                self._ensure_payload_indexes(cname)
+                self._get_client().delete(
+                    collection_name=cname,
+                    points_selector=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
+                )
         except Exception as exc:
-            logger.warning(
-                "Could not delete vectors for doc '%s' in '%s': %s", doc_id, cname, exc
-            )
+            logger.warning("Could not delete vectors for doc '%s' in '%s': %s", doc_id, cname, exc)
 
-    def search(
-        self,
-        kb_id: str,
-        query_vector: list[float],
-        top_k: int = 5,
-        score_threshold: float = 0.0,
-    ) -> list[dict[str, Any]]:
-        """
-        Semantic search. Returns list of dicts with 'id', 'score', and payload fields.
-        """
+    def search(self, kb_id: str, query_vector: list[float], top_k: int = 5, score_threshold: float = 0.0) -> list[dict[str, Any]]:
+        """Semantic search. Returns list of dicts with 'id', 'score', and payload fields."""
         cname = _collection_name(kb_id)
         try:
-            results = self._get_client().search(
-                collection_name=cname,
-                query_vector=query_vector,
-                limit=top_k,
-                score_threshold=score_threshold,
-                with_payload=True,
-            )
-            return [
-                {"id": str(r.id), "score": r.score, **(r.payload or {})}
-                for r in results
-            ]
+            results = self._get_client().search(collection_name=cname, query_vector=query_vector, limit=top_k, score_threshold=score_threshold, with_payload=True)
+            return [{"id": str(r.id), "score": r.score, **(r.payload or {})} for r in results]
         except Exception as exc:
             raise QdrantError(f"Search failed in '{cname}': {exc}") from exc
 
