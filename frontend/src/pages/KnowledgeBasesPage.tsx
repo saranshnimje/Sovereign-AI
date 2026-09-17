@@ -3,7 +3,7 @@ import { knowledgeBasesApi, KnowledgeBase, Document } from '../api/knowledgeBase
 import { useAuthStore } from '../stores/authStore'
 import { useUIStore } from '../stores/uiStore'
 import Badge from '../components/ui/Badge'
-import DocumentPreviewModal from '../components/documents/DocumentPreviewModal'
+import DocumentPreviewSafeModal from '../components/documents/DocumentPreviewSafeModal'
 
 export default function KnowledgeBasesPage() {
   const { user } = useAuthStore()
@@ -30,11 +30,28 @@ export default function KnowledgeBasesPage() {
   }
   useEffect(() => { load() }, [])
 
+  const preferDocument = (a: Document, b: Document) => {
+    const rank: Record<string, number> = { indexed: 4, processing: 3, failed: 2, pending: 1 }
+    return (rank[a.status] || 0) >= (rank[b.status] || 0) ? a : b
+  }
+
+  const dedupeDocuments = (docs: Document[]) => {
+    const byName = new Map<string, Document>()
+    for (const doc of docs) {
+      const key = doc.original_name.trim().toLowerCase()
+      const existing = byName.get(key)
+      byName.set(key, existing ? preferDocument(existing, doc) : doc)
+    }
+    return Array.from(byName.values()).sort((a, b) => b.created_at.localeCompare(a.created_at))
+  }
+
   const loadDocs = async (kb: KnowledgeBase) => {
     setSelectedKB(kb)
     setLoadingDocs(true)
-    try { const docs = await knowledgeBasesApi.listDocuments(kb.id); setDocuments(docs) }
-    catch { setDocuments([]) }
+    try {
+      const docs = await knowledgeBasesApi.listDocuments(kb.id)
+      setDocuments(dedupeDocuments(docs))
+    } catch { setDocuments([]) }
     setLoadingDocs(false)
   }
 
@@ -63,13 +80,32 @@ export default function KnowledgeBasesPage() {
     } catch { addToast({ type: 'error', title: 'Delete failed' }) }
   }
 
+  const handleDeleteDocument = async (doc: Document) => {
+    if (!selectedKB || !window.confirm(`Delete "${doc.original_name}"?`)) return
+    try {
+      await knowledgeBasesApi.deleteDocument(selectedKB.id, doc.id)
+      setDocuments(prev => prev.filter(x => x.id !== doc.id))
+      setKbs(prev => prev.map(k => k.id === selectedKB.id ? { ...k, doc_count: Math.max(0, k.doc_count - 1), chunk_count: Math.max(0, k.chunk_count - (doc.chunk_count || 0)) } : k))
+      if (previewDoc?.id === doc.id) setPreviewDoc(null)
+      addToast({ type: 'info', title: 'Document deleted', message: doc.original_name })
+    } catch (err: any) {
+      addToast({ type: 'error', title: 'Delete failed', message: err?.response?.data?.detail || 'Could not delete document' })
+    }
+  }
+
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !selectedKB) return
+    const existing = documents.find(d => d.original_name.trim().toLowerCase() === file.name.trim().toLowerCase())
+    if (existing && existing.status === 'indexed') {
+      addToast({ type: 'info', title: 'Already uploaded', message: `${file.name} is already indexed in this knowledge base.` })
+      if (fileRef.current) fileRef.current.value = ''
+      return
+    }
     setUploading(true)
     try {
       const doc = await knowledgeBasesApi.uploadDocument(selectedKB.id, file)
-      setDocuments(prev => [...prev, doc])
+      setDocuments(prev => dedupeDocuments([...prev, doc]))
       setKbs(prev => prev.map(k => k.id === selectedKB.id ? { ...k, doc_count: k.doc_count + 1 } : k))
       addToast({ type: 'success', title: 'Uploaded', message: file.name })
     } catch (err: any) {
@@ -80,7 +116,7 @@ export default function KnowledgeBasesPage() {
   }
 
   const statusColors: Record<string, string> = {
-    completed: 'success', processing: 'warning', pending: 'info', failed: 'danger',
+    completed: 'success', processing: 'warning', pending: 'info', indexed: 'success', failed: 'danger',
   }
 
   return (
@@ -131,7 +167,7 @@ export default function KnowledgeBasesPage() {
         <div className="bg-surface-raised border border-surface-border rounded-xl p-12 text-center">
           <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 flex items-center justify-center text-3xl mx-auto mb-4">
             <svg className="w-8 h-8 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0118 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
             </svg>
           </div>
           <h3 className="text-lg font-semibold text-white mb-2">No Knowledge Bases</h3>
@@ -169,7 +205,7 @@ export default function KnowledgeBasesPage() {
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-semibold text-white">{selectedKB.name} - Documents</h2>
             <div className="flex gap-2">
-              <input ref={fileRef} type="file" className="hidden" onChange={handleUpload} accept=".pdf,.docx,.txt,.csv" />
+              <input ref={fileRef} type="file" className="hidden" onChange={handleUpload} accept=".pdf,.docx,.txt,.csv,.md,.markdown,.json,.yaml,.yml" />
               <button onClick={() => fileRef.current?.click()} disabled={uploading}
                 className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg text-xs font-medium hover:bg-cyan-500 disabled:opacity-50">
                 {uploading ? 'Uploading...' : '+ Upload Document'}
@@ -186,17 +222,19 @@ export default function KnowledgeBasesPage() {
               {documents.map(doc => (
                 <div
                   key={doc.id}
-                  onClick={() => setPreviewDoc(doc)}
-                  className="flex items-center justify-between p-3 bg-surface-overlay rounded-lg border border-surface-border hover:border-cyan-700/50 transition-all cursor-pointer"
+                  className="flex items-center justify-between p-3 bg-surface-overlay rounded-lg border border-surface-border hover:border-cyan-700/50 transition-all"
                 >
-                  <div className="flex items-center gap-3">
+                  <button onClick={() => setPreviewDoc(doc)} className="flex items-center gap-3 min-w-0 text-left flex-1">
                     <span className="text-sm">{doc.mime_type === 'application/pdf' ? '📄' : doc.mime_type === 'text/csv' ? '📊' : '📝'}</span>
-                    <div>
-                      <p className="text-sm text-neutral-200">{doc.original_name}</p>
+                    <span className="min-w-0">
+                      <p className="text-sm text-neutral-200 truncate">{doc.original_name}</p>
                       <p className="text-[10px] text-neutral-500">{doc.page_count || 0} pages, {doc.chunk_count || 0} chunks</p>
-                    </div>
+                    </span>
+                  </button>
+                  <div className="flex items-center gap-2 ml-3">
+                    <Badge variant={statusColors[doc.status] as any || 'default'} size="sm">{doc.status}</Badge>
+                    <button onClick={() => handleDeleteDocument(doc)} className="text-[10px] text-neutral-500 hover:text-red-400">Delete</button>
                   </div>
-                  <Badge variant={statusColors[doc.status] as any || 'default'} size="sm">{doc.status}</Badge>
                 </div>
               ))}
             </div>
@@ -205,7 +243,7 @@ export default function KnowledgeBasesPage() {
       )}
 
       {previewDoc && (
-        <DocumentPreviewModal document={previewDoc} onClose={() => setPreviewDoc(null)} />
+        <DocumentPreviewSafeModal document={previewDoc} onClose={() => setPreviewDoc(null)} />
       )}
     </div>
   )
