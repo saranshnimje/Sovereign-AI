@@ -20,6 +20,9 @@ _KNOWN_DIMS: dict[str, int] = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
+    "text-embedding-004": 768,
+    "text-embedding-005": 768,
+    "embedding-001": 768,
     "embed-english-v3.0": 1024,
     "embed-english-light-v3.0": 384,
     "embed-multilingual-v3.0": 1024,
@@ -72,27 +75,27 @@ class EmbeddingService:
 
         return all_embeddings
 
-    async def _cloud_candidates(self, llm) -> list[tuple[str, str | None, str]]:
-        """Resolve cloud provider URLs from the runtime wrapper or DB configuration."""
-        candidates: list[tuple[str, str | None, str]] = []
+    async def _cloud_candidates(self, llm) -> list[tuple[BaseLLMProvider, str]]:
+        """Resolve cloud provider client objects from the runtime wrapper or DB.
+
+        Returns list of (provider_client, label) for providers that support
+        embeddings. Each client has its own native embed() method that knows
+        the correct API format (OpenAI-compatible, Gemini, Cohere, etc.).
+        """
+        candidates: list[tuple[BaseLLMProvider, str]] = []
+
+        # Collect from the runtime failover wrapper (request-path providers)
         providers = getattr(llm, "providers", None)
         if providers:
             for client, _configured_model, label in providers:
-                base_url = getattr(client, "base_url", None) or getattr(client, "_base_url", None)
-                api_key = getattr(client, "_api_key", None) or getattr(client, "api_key", None)
-                if base_url:
-                    candidates.append((str(base_url), api_key, str(label)))
+                # Skip Ollama — it already failed in the native path
+                from services.llm_client import OllamaProvider
+                if isinstance(client, OllamaProvider):
+                    continue
+                candidates.append((client, str(label)))
 
-        base_url = getattr(llm, "base_url", None) or getattr(llm, "_base_url", None)
-        api_key = getattr(llm, "_api_key", None) or getattr(llm, "api_key", None)
-        if base_url:
-            candidate = (str(base_url), api_key, llm.__class__.__name__)
-            if candidate not in candidates:
-                candidates.append(candidate)
-
-        # Background ingestion may receive the legacy local Ollama client.
-        # Resolve enabled cloud providers directly so KB ingestion does not
-        # depend on whether the request path constructed a provider wrapper.
+        # Background ingestion receives the legacy Ollama client.
+        # Resolve enabled cloud providers directly from the DB.
         try:
             from database import AsyncSessionLocal
             from models.provider import LLMProvider
@@ -101,7 +104,10 @@ class EmbeddingService:
             async with AsyncSessionLocal() as db:
                 result = await db.execute(select(LLMProvider).where(LLMProvider.enabled == True))
                 db_providers = list(result.scalars().all())
+            seen_labels = {label for _, label in candidates}
             for provider in db_providers:
+                if provider.provider_type in ("ollama", "ollama_compatible", "ollama_docker"):
+                    continue
                 try:
                     client = build_provider(
                         provider_type=provider.provider_type,
@@ -109,12 +115,10 @@ class EmbeddingService:
                         api_key=provider.api_key,
                         custom_headers=getattr(provider, "custom_headers", None),
                     )
-                    provider_base = getattr(client, "base_url", None) or getattr(client, "_base_url", None)
-                    provider_key = getattr(client, "_api_key", None) or getattr(client, "api_key", None)
-                    if provider_base:
-                        candidate = (str(provider_base), provider_key, str(provider.name))
-                        if candidate not in candidates:
-                            candidates.append(candidate)
+                    label = str(provider.name)
+                    if label not in seen_labels:
+                        candidates.append((client, label))
+                        seen_labels.add(label)
                 except Exception as exc:
                     logger.warning("Skipping embedding provider %s: %s", provider.name, exc)
         except Exception as exc:
@@ -134,25 +138,24 @@ class EmbeddingService:
         "mistral": ["mistral-embed"],
         "cohere": ["embed-english-v3.0"],
         "huggingface": ["sentence-transformers/all-MiniLM-L6-v2"],
+        "gemini": ["text-embedding-004", "text-embedding-005"],
     }
 
     async def _cloud_embed(self, model: str, texts: list[str]) -> list[list[float]]:
-        """Use OpenAI-compatible embeddings for configured cloud providers."""
-        import httpx
+        """Embed via cloud provider objects using their native embed() methods.
 
+        Each provider (Gemini, Cohere, OpenAI-compatible, etc.) knows its own
+        correct API endpoint and request format. This avoids constructing
+        raw HTTP requests that only work for OpenAI-compatible providers.
+        """
         candidates = await self._cloud_candidates(self.llm)
         if not candidates:
-            raise ModelUnavailableError("No provider base URL available for cloud embeddings")
+            raise ModelUnavailableError("No cloud embedding providers available")
 
-        errors: list[str] = []
-        for base_url, api_key, label in candidates:
-            base = base_url.rstrip("/")
-            url = f"{base}/embeddings" if base.endswith("/v1") else f"{base}/v1/embeddings"
-            headers = {"Content-Type": "application/json"}
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
+        # Build model variants: original + provider-specific fallbacks
+        all_errors: list[str] = []
 
-            # Determine model name variants to try for this provider
+        for provider_client, label in candidates:
             label_lower = label.lower()
             model_variants: list[str] = [model]
             for provider_key, fallbacks in self._CLOUD_MODEL_FALLBACKS.items():
@@ -162,35 +165,26 @@ class EmbeddingService:
                             model_variants.append(fb)
                     break
 
-            # For OpenRouter, prefix OpenAI models
-            if "openrouter" in label_lower:
-                model_variants = [
-                    f"openai/{m}" if m.startswith("text-embedding-") else m
-                    for m in model_variants
-                ]
-
             provider_errors: list[str] = []
-            for request_model in model_variants:
+            for try_model in model_variants:
                 try:
-                    async with httpx.AsyncClient(timeout=120.0) as client:
-                        resp = await client.post(
-                            url,
-                            json={"model": request_model, "input": texts},
-                            headers=headers,
+                    resp = await provider_client.embed(model=try_model, texts=texts)
+                    if resp.embeddings:
+                        logger.info(
+                            "Cloud embedding succeeded via %s model=%s dims=%d",
+                            label, try_model, len(resp.embeddings[0]),
                         )
-                        resp.raise_for_status()
-                        data = resp.json()
-                    embeddings = [item["embedding"] for item in data.get("data", [])]
-                    if not embeddings:
-                        raise ModelUnavailableError("Embedding provider returned no vectors")
-                    return embeddings
+                        return resp.embeddings
+                    provider_errors.append(f"{try_model}: returned no vectors")
                 except Exception as exc:
-                    provider_errors.append(f"{request_model}: {exc}")
+                    provider_errors.append(f"{try_model}: {exc}")
                     continue
 
-            errors.append(f"{label}: {'; '.join(provider_errors[-3:])}")
+            all_errors.append(f"{label}: {'; '.join(provider_errors[-3:])}")
 
-        raise ModelUnavailableError("All cloud embedding providers failed. " + " | ".join(errors[-4:]))
+        raise ModelUnavailableError(
+            "All cloud embedding providers failed. " + " | ".join(all_errors[-4:])
+        )
 
     async def embed_query(self, query: str, model: str) -> list[float]:
         results = await self.embed_texts([query], model)

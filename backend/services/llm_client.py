@@ -220,6 +220,29 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         except Exception: return False, None
     async def list_models(self):
         resp=await self._get_client().get(f"{self._api_root()}/models", headers=self._build_headers(), timeout=5.0); resp.raise_for_status(); return resp.json().get("data", [])
+    async def embed(self, model: str, texts: list[str]) -> EmbeddingResponse:
+        """OpenAI-compatible embedding endpoint."""
+        payload = {"model": model, "input": texts}
+        try:
+            resp = await self._get_client().post(
+                f"{self._api_root()}/embeddings", json=payload, headers=self._build_headers()
+            )
+            resp.raise_for_status()
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            raise ModelUnavailableError(str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ModelUnavailableError(
+                f"{exc} | Response: {exc.response.text[:500] if exc.response else ''}"
+            ) from exc
+        data = resp.json()
+        embeddings = [item["embedding"] for item in data.get("data", [])]
+        if not embeddings:
+            raise ModelUnavailableError("Embedding provider returned no vectors")
+        usage = data.get("usage", {})
+        return EmbeddingResponse(
+            embeddings=embeddings, model=data.get("model", model),
+            tokens=usage.get("total_tokens", 0),
+        )
     async def verify_auth(self, model=None):
         if not self._api_key or not model: return None, None
         try: resp=await self._get_client().post(f"{self._api_root()}/chat/completions", json={"model":model,"messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":False}, headers=self._build_headers(), timeout=45.0)
