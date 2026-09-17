@@ -1,9 +1,4 @@
-"""
-Startup migration helper for Sovereign AI Workbench.
-
-Handles databases bootstrapped via create_all() that do not have a complete
-Alembic history. All fixes here are idempotent and safe to run at startup.
-"""
+"""Startup migration helper for Sovereign AI Workbench."""
 import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -32,10 +27,7 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
         async with engine.begin() as conn:
             for col_name, col_ddl in _AGENT_RUNS_COLUMNS:
                 if not await _column_exists(conn, "agent_runs", col_name, is_postgres):
-                    await conn.execute(text(
-                        f"ALTER TABLE agent_runs ADD COLUMN {col_name} {col_ddl}"
-                    ))
-                    logger.info("Added missing column", table="agent_runs", column=col_name)
+                    await conn.execute(text(f"ALTER TABLE agent_runs ADD COLUMN {col_name} {col_ddl}"))
 
             if is_postgres and not await _table_exists(conn, "agent_events", True):
                 await conn.execute(text("""
@@ -89,24 +81,22 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
                         FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE SET NULL
                     )
                 """))
-                for idx_col in ["user_id", "conversation_id", "run_id"]:
+                for idx_col in ("user_id", "conversation_id", "run_id"):
                     await conn.execute(text(
                         f"CREATE INDEX IF NOT EXISTS ix_artifacts_{idx_col} ON artifacts ({idx_col})"
                     ))
 
-            # Existing Neon databases were stamped directly to d4e5f6a7b8c9,
-            # so the Alembic migration could never run. Apply the FK change
-            # directly and idempotently here, then record the new head.
             if is_postgres and await _table_exists(conn, "audit_logs", True):
                 fk = await conn.execute(text("""
-                    SELECT pg_get_constraintdef(c.oid) AS definition
+                    SELECT pg_get_constraintdef(c.oid)
                     FROM pg_constraint c
                     JOIN pg_class t ON t.oid = c.conrelid
                     WHERE t.relname = 'audit_logs'
                       AND c.conname = 'audit_logs_user_id_fkey'
-                ""))
+                """))
                 fk_row = fk.fetchone()
-                if not fk_row or "ON DELETE SET NULL" not in (fk_row[0] or "").upper():
+                definition = str(fk_row[0] or "") if fk_row else ""
+                if "ON DELETE SET NULL" not in definition.upper():
                     await conn.execute(text(
                         "ALTER TABLE audit_logs DROP CONSTRAINT IF EXISTS audit_logs_user_id_fkey"
                     ))
@@ -119,7 +109,7 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
                     ))
                     logger.info("Updated audit_logs.user_id FK to ON DELETE SET NULL")
 
-            await _stamp_alembic_head(conn, is_postgres)
+            await _stamp_alembic_head(conn)
     except Exception as exc:
         logger.warning("Startup migration fixup failed", error=str(exc))
 
@@ -147,7 +137,7 @@ async def _table_exists(conn, table: str, is_postgres: bool) -> bool:
     return result.fetchone() is not None
 
 
-async def _stamp_alembic_head(conn, is_postgres: bool) -> None:
+async def _stamp_alembic_head(conn) -> None:
     await conn.execute(text("""
         CREATE TABLE IF NOT EXISTS alembic_version (
             version_num VARCHAR(32) NOT NULL PRIMARY KEY
@@ -161,5 +151,3 @@ async def _stamp_alembic_head(conn, is_postgres: bool) -> None:
             "INSERT INTO alembic_version (version_num) VALUES (:v)"
         ), {"v": target})
         logger.info("Stamped alembic_version", revision=target)
-    else:
-        logger.info("Alembic already at head", revision=target)
