@@ -25,8 +25,10 @@ class AuditLog(Base):
     timestamp: Mapped[datetime] = mapped_column(
         UTCDateTime, default=func.now(), nullable=False, index=True
     )
+    # Keep audit history when a user is deleted; the event remains immutable and
+    # the actor reference is anonymized by setting user_id to NULL.
     user_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=True, index=True
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
