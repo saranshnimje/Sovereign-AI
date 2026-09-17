@@ -11,7 +11,6 @@ from services.llm_client import ModelUnavailableError, OllamaClient, BaseLLMProv
 
 logger = logging.getLogger(__name__)
 
-# Known vector dimensions for common embedding models
 _KNOWN_DIMS: dict[str, int] = {
     "nomic-embed-text": 768,
     "mxbai-embed-large": 1024,
@@ -48,7 +47,6 @@ class EmbeddingService:
         model: str,
         batch_size: int | None = None,
     ) -> list[list[float]]:
-        """Embed texts, preferring native provider embeddings and then cloud fallback."""
         if not texts:
             return []
 
@@ -62,9 +60,6 @@ class EmbeddingService:
                 all_embeddings.extend(resp.embeddings)
                 continue
             except Exception as native_exc:
-                # Cloud providers commonly inherit BaseLLMProvider.embed(), which
-                # deliberately raises ModelUnavailableError. Do not stop ingestion
-                # there; try the provider's OpenAI-compatible /embeddings endpoint.
                 logger.debug("Native embedding path failed; trying cloud fallback: %s", native_exc)
 
             try:
@@ -77,9 +72,8 @@ class EmbeddingService:
 
         return all_embeddings
 
-    @staticmethod
-    def _cloud_candidates(llm) -> list[tuple[str, str | None, str]]:
-        """Return (base_url, api_key, label) candidates from the resolved LLM."""
+    async def _cloud_candidates(self, llm) -> list[tuple[str, str | None, str]]:
+        """Resolve cloud provider URLs from the runtime wrapper or DB configuration."""
         candidates: list[tuple[str, str | None, str]] = []
         providers = getattr(llm, "providers", None)
         if providers:
@@ -95,26 +89,55 @@ class EmbeddingService:
             candidate = (str(base_url), api_key, llm.__class__.__name__)
             if candidate not in candidates:
                 candidates.append(candidate)
+
+        # Background ingestion may receive the legacy local Ollama client.
+        # Resolve enabled cloud providers directly so KB ingestion does not
+        # depend on whether the request path constructed a provider wrapper.
+        try:
+            from database import AsyncSessionLocal
+            from models.provider import LLMProvider
+            from sqlalchemy import select
+            from services.llm_client import build_provider
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(LLMProvider).where(LLMProvider.enabled == True))
+                db_providers = list(result.scalars().all())
+            for provider in db_providers:
+                try:
+                    client = build_provider(
+                        provider_type=provider.provider_type,
+                        base_url=provider.base_url,
+                        api_key=provider.api_key,
+                        custom_headers=getattr(provider, "custom_headers", None),
+                    )
+                    provider_base = getattr(client, "base_url", None) or getattr(client, "_base_url", None)
+                    provider_key = getattr(client, "_api_key", None) or getattr(client, "api_key", None)
+                    if provider_base:
+                        candidate = (str(provider_base), provider_key, str(provider.name))
+                        if candidate not in candidates:
+                            candidates.append(candidate)
+                except Exception as exc:
+                    logger.warning("Skipping embedding provider %s: %s", provider.name, exc)
+        except Exception as exc:
+            logger.warning("Unable to load DB embedding providers: %s", exc)
+
         return candidates
 
     async def _cloud_embed(self, model: str, texts: list[str]) -> list[list[float]]:
         """Use OpenAI-compatible embeddings for configured cloud providers."""
         import httpx
 
-        candidates = self._cloud_candidates(self.llm)
+        candidates = await self._cloud_candidates(self.llm)
         if not candidates:
             raise ModelUnavailableError("No provider base URL available for cloud embeddings")
 
         errors: list[str] = []
         for base_url, api_key, label in candidates:
             base = base_url.rstrip("/")
-            # OpenRouter/OpenAI-compatible providers commonly already include /v1.
             url = f"{base}/embeddings" if base.endswith("/v1") else f"{base}/v1/embeddings"
             headers = {"Content-Type": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
 
-            # OpenRouter exposes OpenAI embedding models with the provider prefix.
             request_model = model
             if label.lower().find("openrouter") >= 0 and model.startswith("text-embedding-"):
                 request_model = f"openai/{model}"
@@ -139,12 +162,10 @@ class EmbeddingService:
         raise ModelUnavailableError("All cloud embedding providers failed. " + " | ".join(errors[-4:]))
 
     async def embed_query(self, query: str, model: str) -> list[float]:
-        """Embed a single query string."""
         results = await self.embed_texts([query], model)
         return results[0] if results else []
 
     async def check_model_available(self, model: str) -> bool:
-        """Return True if the embedding model responds correctly."""
         try:
             result = await self.embed_texts(["test"], model)
             return len(result) > 0 and len(result[0]) > 0
