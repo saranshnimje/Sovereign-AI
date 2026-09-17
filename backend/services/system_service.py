@@ -42,18 +42,40 @@ async def _refresh_system_status() -> SystemStatus:
     global _status_cache
     settings = get_settings()
     services: dict[str, ServiceStatus] = {}
-
-    # Read provider configuration quickly, then release the DB connection
-    # before performing network health checks. Holding a pooled DB connection
-    # while waiting on external providers can exhaust the pool under load.
     providers: list[dict] = []
+    models_loaded: list[str] = []
+
+    # Read provider configuration and the enabled/available model catalog in
+    # one short DB scope. This is the source of truth for the dashboard model
+    # list; network health checks happen only after the connection is released.
     try:
         from database import AsyncSessionLocal
         from models.provider import LLMProvider
+        from models.provider_model import ProviderModel
 
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(LLMProvider).where(LLMProvider.enabled == True))  # noqa: E712
-            for p in result.scalars().all():
+            provider_result = await db.execute(select(LLMProvider).where(LLMProvider.enabled == True))  # noqa: E712
+            enabled_providers = provider_result.scalars().all()
+            provider_ids = [p.id for p in enabled_providers]
+
+            if provider_ids:
+                model_result = await db.execute(
+                    select(ProviderModel.model_id, ProviderModel.display_name)
+                    .where(
+                        ProviderModel.provider_id.in_(provider_ids),
+                        ProviderModel.status == "available",
+                        ProviderModel.enabled == True,  # noqa: E712
+                    )
+                    .order_by(ProviderModel.display_name, ProviderModel.model_id)
+                )
+                seen_models: set[str] = set()
+                for model_id, display_name in model_result.all():
+                    name = (display_name or model_id or "").strip()
+                    if name and name not in seen_models:
+                        seen_models.add(name)
+                        models_loaded.append(name)
+
+            for p in enabled_providers:
                 custom_h = None
                 if p.custom_headers:
                     try:
@@ -68,7 +90,7 @@ async def _refresh_system_status() -> SystemStatus:
                     "custom_headers": custom_h,
                 })
     except Exception as exc:
-        logger.warning("Failed to load LLM providers: %s", exc)
+        logger.warning("Failed to load LLM providers/models: %s", exc)
 
     if not providers:
         services["llm"] = ServiceStatus(status="down", detail="Offline")
@@ -129,10 +151,14 @@ async def _refresh_system_status() -> SystemStatus:
 
     services["database"] = ServiceStatus(status="up")
     resources = _get_resource_metrics()
-    models_loaded: list[str] = []
     down_count = sum(1 for s in services.values() if s.status == "down")
     overall = "healthy" if down_count == 0 else "degraded" if down_count < len(services) else "unhealthy"
-    status = SystemStatus(status=overall, services=services, resources=resources, models_loaded=models_loaded)
+    status = SystemStatus(
+        status=overall,
+        services=services,
+        resources=resources,
+        models_loaded=models_loaded,
+    )
     _status_cache = (status, time.monotonic() + _STATUS_TTL)
     return status
 
