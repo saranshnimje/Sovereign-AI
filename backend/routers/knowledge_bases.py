@@ -8,7 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
+from database import AsyncSessionLocal, get_db
 from dependencies import AnalystRequired, get_current_user, get_llm_client, require_role
 from models.knowledge_base import Document, KnowledgeBase
 from models.user import User
@@ -44,6 +44,18 @@ def _doc_service(db: AsyncSession, llm_client=None) -> DocumentService:
         llm_client = get_llm_client()
     embedding_svc = EmbeddingService(llm_client)
     return DocumentService(db, embedding_svc, QdrantService())
+
+
+async def _process_document_background(doc_id: str) -> None:
+    """Process a document with a fresh DB session after upload has committed."""
+    async with AsyncSessionLocal() as task_db:
+        svc = _doc_service(task_db)
+        try:
+            await svc.process_document(doc_id)
+            await task_db.commit()
+        except Exception:
+            await task_db.rollback()
+            logger.exception("Background document processing failed for %s", doc_id)
 
 
 # ------------------------------------------------------------------
@@ -85,7 +97,6 @@ async def get_knowledge_base(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Tenancy: foreign or missing KB → identical 404 (no existence leakage)
     svc = _kb_service(db)
     return await get_kb_checked(db, kb_id, user)
 
@@ -97,7 +108,6 @@ async def delete_knowledge_base(
     user: User = AnalystRequired,
     db: AsyncSession = Depends(get_db),
 ):
-    # Owner or admin may delete; foreign/unknown → 404
     svc = _kb_service(db)
     kb = await get_kb_checked(db, kb_id, user, write=True)
     client_ip = request.client.host if request.client else None
@@ -112,10 +122,6 @@ async def query_knowledge_base(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    RAG query over a KB the user may access. Foreign/unknown KB → 404.
-    Returns answer, sources (with chunk/dedup metadata) and low_confidence.
-    """
     kb = await get_kb_checked(db, kb_id, user)
 
     llm = OllamaClient(get_settings().ollama_url)
@@ -181,7 +187,11 @@ async def upload_document(
         doc = await svc.upload_document(file, kb_id, _user.id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    background_tasks.add_task(svc.process_document, doc.id)
+
+    # Commit before scheduling the worker so its fresh DB session can see the row.
+    await db.commit()
+    await db.refresh(doc)
+    background_tasks.add_task(_process_document_background, doc.id)
     return doc
 
 
