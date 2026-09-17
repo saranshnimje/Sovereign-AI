@@ -35,5 +35,8 @@ export const authApi = {
   updateUser: (id: string, data: Partial<{ role: string; is_active: boolean }>) =>
     api.put<UserResponse>(`/auth/users/${id}`, data).then((r) => r.data),
 
+  deleteUser: (id: string) =>
+    api.delete<{ message: string; id: string }>(`/auth/users/${id}`).then((r) => r.data),
+
   getDemoUsers: () => api.get<DemoUser[]>('/auth/demo-users').then((r) => r.data),
 }
