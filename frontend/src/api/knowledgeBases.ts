@@ -61,12 +61,11 @@ export const knowledgeBasesApi = {
    * Download a document as a blob through the authenticated API client.
    * Returns a blob URL that the caller must revoke after use.
    */
-  downloadDocument: async (docId: string, filename: string): Promise<string> => {
+  downloadDocument: async (docId: string, _filename: string): Promise<string> => {
     const response = await api.get(`/documents/${docId}/download`, {
       responseType: 'blob',
     })
-    const blob = new Blob([response.data])
-    return URL.createObjectURL(blob)
+    return URL.createObjectURL(response.data as Blob)
   },
 
   /**
@@ -77,8 +76,7 @@ export const knowledgeBasesApi = {
     const response = await api.get(`/documents/${docId}/download`, {
       responseType: 'blob',
     })
-    const blob = new Blob([response.data])
-    return URL.createObjectURL(blob)
+    return URL.createObjectURL(response.data as Blob)
   },
 
   /**
@@ -88,6 +86,6 @@ export const knowledgeBasesApi = {
     const response = await api.get(`/documents/${docId}/download`, {
       responseType: 'arraybuffer',
     })
-    return response.data
+    return response.data as ArrayBuffer
   },
 }

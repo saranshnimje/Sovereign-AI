@@ -61,6 +61,23 @@ function parseCsvLine(line: string): string[] {
   return result
 }
 
+function getErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object' && 'response' in err) {
+    const axiosErr = err as { response?: { status?: number; data?: unknown } }
+    if (axiosErr.response?.status === 404) return 'Document not found on server. It may have been deleted.'
+    if (axiosErr.response?.status === 403) return 'You do not have permission to view this document.'
+    if (axiosErr.response?.status === 429) return 'Too many requests. Please wait a moment and try again.'
+    if (axiosErr.response?.status === 500) return 'Server error. Please try again later.'
+    const detail = (axiosErr.response?.data as { detail?: string })?.detail
+    if (detail) return detail
+    return `Request failed (HTTP ${axiosErr.response?.status || 'unknown'})`
+  }
+  if (err instanceof TypeError && err.message.includes('Failed to fetch')) {
+    return 'Network error. Please check your connection.'
+  }
+  return 'Failed to load document preview'
+}
+
 export default function DocumentPreviewModal({ document: doc, onClose }: Props) {
   const [preview, setPreview] = useState<DocumentPreview | null>(null)
   const [loading, setLoading] = useState(true)
@@ -98,8 +115,9 @@ export default function DocumentPreviewModal({ document: doc, onClose }: Props) 
         const data = await knowledgeBasesApi.previewDocument(doc.id)
         setPreview(data)
       }
-    } catch {
-      setError('Failed to load document preview')
+    } catch (err) {
+      console.error(`[DocumentPreview] Failed to load ${kind} preview for doc ${doc.id}:`, err)
+      setError(getErrorMessage(err))
     }
     setLoading(false)
   }, [doc.id, doc.original_name, doc.mime_type, kind])
@@ -126,8 +144,9 @@ export default function DocumentPreviewModal({ document: doc, onClose }: Props) 
       a.click()
       document.body.removeChild(a)
       setTimeout(() => URL.revokeObjectURL(url), 1000)
-    } catch {
-      setError('Download failed. Please try again.')
+    } catch (err) {
+      console.error('[DocumentPreview] Download failed:', err)
+      setError(getErrorMessage(err))
     }
   }
 

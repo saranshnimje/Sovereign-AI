@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
+import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl
 
 interface Props {
   url: string
@@ -34,6 +35,7 @@ export default function PDFViewer({ url, filename }: Props) {
         setTotalPages(pdfDoc.numPages)
         setCurrentPage(1)
       } catch (err) {
+        console.error('PDF load error:', err)
         if (!cancelled) setError('Failed to load PDF document')
       } finally {
         if (!cancelled) setLoading(false)
