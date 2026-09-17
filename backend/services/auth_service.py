@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from fastapi import HTTPException, Request
 from passlib.context import CryptContext
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import get_settings
@@ -21,31 +21,13 @@ from schemas.auth import (
     UserResponse,
 )
 
-# Common passwords blocklist (top subset — expand for production)
 COMMON_PASSWORDS = {
-    "password123456",
-    "qwerty123456789",
-    "123456789012",
-    "password1234",
-    "iloveyou1234",
-    "sunshine12345",
-    "princess12345",
-    "welcome123456",
-    "dragon123456!!",
-    "master123456!!",
+    "password123456", "qwerty123456789", "123456789012", "password1234",
+    "iloveyou1234", "sunshine12345", "princess12345", "welcome123456",
+    "dragon123456!!", "master123456!!",
 }
 
-# Verified demo credentials — password is ONLY included for accounts
-# that have been explicitly confirmed to work against the live database.
-# This dict is server-side only; the API never returns raw passwords for
-# accounts not listed here.
-#
-# Only the Admin prototype account is a demo credential. All other
-# accounts should not exist in the prototype DB, and even if one does,
-# it is never exposed with a password.
-DEMO_CREDENTIALS: dict[str, str] = {
-    "admin@admin.com": "admin12345678",
-}
+DEMO_CREDENTIALS: dict[str, str] = {"admin@admin.com": "admin12345678"}
 
 
 class AuthService:
@@ -54,24 +36,14 @@ class AuthService:
         self.settings = get_settings()
         self.pwd_ctx = CryptContext(schemes=["bcrypt"], bcrypt__rounds=12, deprecated="auto")
 
-    # ------------------------------------------------------------------
-    # Registration
-    # ------------------------------------------------------------------
     async def register(self, data: RegisterRequest, first_admin: bool = False) -> User:
-        """Create a new user. first_admin=True promotes role to 'admin'."""
-        # Duplicate check
         result = await self.db.execute(
-            select(User).where(
-                (User.email == data.email) | (User.username == data.username)
-            )
+            select(User).where((User.email == data.email) | (User.username == data.username))
         )
         if result.scalar_one_or_none():
             raise HTTPException(400, "Email or username already registered")
-
-        # Common password check
         if data.password.lower() in COMMON_PASSWORDS:
             raise HTTPException(400, "Password is too common — choose a stronger one")
-
         user = User(
             email=data.email,
             username=data.username,
@@ -80,144 +52,69 @@ class AuthService:
             is_active=True,
         )
         self.db.add(user)
-        await self.db.flush()  # get ID without committing
+        await self.db.flush()
         return user
 
-    # ------------------------------------------------------------------
-    # Login
-    # ------------------------------------------------------------------
-    async def login(
-        self, data: LoginRequest, request: Request | None = None
-    ) -> tuple[TokenResponse, str]:
-        """
-        Authenticate user. Returns (TokenResponse, refresh_token_plain_text).
-        The refresh token plain text must be set as an httpOnly cookie by the router.
-        """
+    async def login(self, data: LoginRequest, request: Request | None = None) -> tuple[TokenResponse, str]:
         user = await self._get_by_email(data.email)
         if not user or not self.pwd_ctx.verify(data.password, user.password_hash):
             raise HTTPException(401, "Invalid email or password")
         if not user.is_active:
             raise HTTPException(403, "Account is disabled — contact your administrator")
-
         user.last_login = datetime.now(timezone.utc)
         await self.db.flush()
-
         access_token = self._create_access_token(user.id)
         refresh_plain, refresh_hash = self._create_refresh_pair()
-
-        expires = datetime.now(timezone.utc) + timedelta(
-            days=self.settings.jwt_refresh_ttl_days
-        )
-        rt = RefreshToken(
-            user_id=user.id,
-            token_hash=refresh_hash,
-            expires_at=expires,
-        )
-        self.db.add(rt)
+        expires = datetime.now(timezone.utc) + timedelta(days=self.settings.jwt_refresh_ttl_days)
+        self.db.add(RefreshToken(user_id=user.id, token_hash=refresh_hash, expires_at=expires))
         await self.db.flush()
+        return TokenResponse(access_token=access_token, expires_in=self.settings.jwt_access_ttl_min * 60), refresh_plain
 
-        token_resp = TokenResponse(
-            access_token=access_token,
-            expires_in=self.settings.jwt_access_ttl_min * 60,
-        )
-        return token_resp, refresh_plain
-
-    # ------------------------------------------------------------------
-    # Token verification
-    # ------------------------------------------------------------------
     async def verify_token(self, token: str) -> User:
-        """Decode and validate a JWT access token. Returns the User."""
         try:
-            payload = jwt.decode(
-                token,
-                self.settings.secret_key,
-                algorithms=[self.settings.jwt_algorithm],
-            )
+            payload = jwt.decode(token, self.settings.secret_key, algorithms=[self.settings.jwt_algorithm])
         except jwt.ExpiredSignatureError:
             raise HTTPException(401, "Token has expired")
         except jwt.InvalidTokenError:
             raise HTTPException(401, "Invalid token")
-
         if payload.get("type") != "access":
             raise HTTPException(401, "Wrong token type")
-
         user = await self._get_by_id(payload["sub"])
         if not user or not user.is_active:
             raise HTTPException(401, "User not found or inactive")
         return user
 
-    # ------------------------------------------------------------------
-    # Refresh
-    # ------------------------------------------------------------------
     async def refresh(self, refresh_plain: str) -> tuple[TokenResponse, str]:
-        """Rotate refresh token. Returns new (TokenResponse, new_refresh_plain)."""
         token_hash = self._hash_token(refresh_plain)
-        result = await self.db.execute(
-            select(RefreshToken).where(
-                RefreshToken.token_hash == token_hash,
-                RefreshToken.revoked == False,  # noqa: E712
-            )
-        )
+        result = await self.db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash, RefreshToken.revoked == False))  # noqa: E712
         rt = result.scalar_one_or_none()
         if not rt:
             raise HTTPException(401, "Invalid or revoked refresh token")
-
         now = datetime.now(timezone.utc)
-        # Ensure the expires_at is timezone-aware for comparison
-        expires_at = rt.expires_at
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-
+        expires_at = rt.expires_at if rt.expires_at.tzinfo else rt.expires_at.replace(tzinfo=timezone.utc)
         if expires_at < now:
             raise HTTPException(401, "Refresh token has expired")
-
-        # Revoke old token
         rt.revoked = True
         await self.db.flush()
-
         user = await self._get_by_id(rt.user_id)
         if not user or not user.is_active:
             raise HTTPException(401, "User not found or inactive")
-
         access_token = self._create_access_token(user.id)
         new_plain, new_hash = self._create_refresh_pair()
-        new_expires = now + timedelta(days=self.settings.jwt_refresh_ttl_days)
-        new_rt = RefreshToken(
-            user_id=user.id,
-            token_hash=new_hash,
-            expires_at=new_expires,
-        )
-        self.db.add(new_rt)
+        self.db.add(RefreshToken(user_id=user.id, token_hash=new_hash, expires_at=now + timedelta(days=self.settings.jwt_refresh_ttl_days)))
         await self.db.flush()
+        return TokenResponse(access_token=access_token, expires_in=self.settings.jwt_access_ttl_min * 60), new_plain
 
-        token_resp = TokenResponse(
-            access_token=access_token,
-            expires_in=self.settings.jwt_access_ttl_min * 60,
-        )
-        return token_resp, new_plain
-
-    # ------------------------------------------------------------------
-    # Logout
-    # ------------------------------------------------------------------
     async def logout(self, refresh_plain: str | None) -> None:
-        """Revoke refresh token if provided."""
         if not refresh_plain:
             return
-        token_hash = self._hash_token(refresh_plain)
-        result = await self.db.execute(
-            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
-        )
+        result = await self.db.execute(select(RefreshToken).where(RefreshToken.token_hash == self._hash_token(refresh_plain)))
         rt = result.scalar_one_or_none()
         if rt:
             rt.revoked = True
             await self.db.flush()
 
-    # ------------------------------------------------------------------
-    # Admin helpers
-    # ------------------------------------------------------------------
     async def count_users(self) -> int:
-        """Return total number of users — used for first-run detection."""
-        from sqlalchemy import func
         result = await self.db.execute(select(func.count()).select_from(User))
         return result.scalar_one()
 
@@ -238,18 +135,23 @@ class AuthService:
         await self.db.flush()
         return user
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
+    async def delete_user(self, user_id: str, admin_id: str) -> None:
+        if user_id == admin_id:
+            raise HTTPException(400, "You cannot delete your own admin account")
+        user = await self._get_by_id(user_id)
+        if not user:
+            raise HTTPException(404, "User not found")
+        admin_count = await self.db.scalar(select(func.count()).select_from(User).where(User.role == "admin", User.is_active == True))  # noqa: E712
+        if user.role == "admin" and admin_count <= 1:
+            raise HTTPException(400, "Cannot delete the last active admin")
+        await self.db.delete(user)
+        await self.db.flush()
+
     def _create_access_token(self, user_id: str) -> str:
-        expire = datetime.now(timezone.utc) + timedelta(
-            minutes=self.settings.jwt_access_ttl_min
-        )
-        payload = {"sub": user_id, "exp": expire, "type": "access"}
-        return jwt.encode(payload, self.settings.secret_key, algorithm=self.settings.jwt_algorithm)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=self.settings.jwt_access_ttl_min)
+        return jwt.encode({"sub": user_id, "exp": expire, "type": "access"}, self.settings.secret_key, algorithm=self.settings.jwt_algorithm)
 
     def _create_refresh_pair(self) -> tuple[str, str]:
-        """Return (plain_text_token, sha256_hash_of_token)."""
         import secrets
         plain = secrets.token_urlsafe(64)
         return plain, self._hash_token(plain)
@@ -258,36 +160,12 @@ class AuthService:
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    # ------------------------------------------------------------------
-    # Demo users (login-page display)
-    # ------------------------------------------------------------------
     async def get_demo_users(self) -> list[DemoUserResponse]:
-        """Return the Admin demo user for the login page.
-
-        Only the Admin account is a prototype demo credential. Non-admin
-        accounts are never returned, so the login page can only ever
-        display the Admin user. Passwords are only included for accounts
-        in ``DEMO_CREDENTIALS`` (server-side, explicitly verified).
-
-        In production, demo credentials are never exposed.
-        """
         if self.settings.environment.strip().lower() == "production":
             return []
-        result = await self.db.execute(
-            select(User)
-            .where(User.is_active == True, User.role == "admin")  # noqa: E712
-            .order_by(User.created_at)
-        )
+        result = await self.db.execute(select(User).where(User.is_active == True, User.role == "admin").order_by(User.created_at))  # noqa: E712
         users = list(result.scalars().all())
-        return [
-            DemoUserResponse(
-                email=u.email,
-                role=u.role,
-                has_demo_password=(u.email in DEMO_CREDENTIALS),
-                demo_password=DEMO_CREDENTIALS.get(u.email),
-            )
-            for u in users
-        ]
+        return [DemoUserResponse(email=u.email, role=u.role, has_demo_password=(u.email in DEMO_CREDENTIALS), demo_password=DEMO_CREDENTIALS.get(u.email)) for u in users]
 
     async def _get_by_email(self, email: str) -> User | None:
         result = await self.db.execute(select(User).where(User.email == email))
