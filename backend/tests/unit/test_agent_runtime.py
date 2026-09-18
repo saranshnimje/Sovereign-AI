@@ -618,3 +618,45 @@ async def test_no_duplicate_events_from_gen_and_runtime():
     # Event types should match
     types = [e.event_type for e in persisted_events]
     assert types == ["agent_started", "plan_created", "tool_call"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_kb_request_forces_search_kb_before_llm():
+    """Explicit KB/policy requests must deterministically retrieve KB evidence."""
+    runtime = AgentRuntime()
+    runtime._user_kb_ids = ["kb-1"]
+
+    agent = AgentStateMachine()
+    agent.start("using my knowledge base, tell me the leave policy")
+    agent.create_plan([
+        {
+            "description": "Search the user's knowledge base",
+            "tool_name": "search_kb",
+        },
+        {
+            "description": "Answer from retrieved evidence",
+            "tool_name": None,
+        },
+    ])
+
+    llm = MagicMock()
+    llm.chat = AsyncMock()
+
+    decision = await runtime._decide(
+        llm=llm,
+        model="test",
+        goal="using my knowledge base, tell me the leave policy",
+        agent=agent,
+        observations=[],
+        evidence=[],
+        failed_attempts=[],
+        tool_results_context=[],
+        tool_descriptions="search_kb: semantic search over the user's knowledge base",
+    )
+
+    assert decision.decision == "CONTINUE"
+    assert decision.next_action is not None
+    assert decision.next_action.tool == "search_kb"
+    assert decision.next_action.input["kb_id"] if "kb_id" in decision.next_action.input else True
+    assert decision.next_action.input["query"] == "using my knowledge base, tell me the leave policy"
+    llm.chat.assert_not_awaited()
