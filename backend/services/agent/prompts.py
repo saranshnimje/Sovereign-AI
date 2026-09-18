@@ -10,6 +10,7 @@ Create enough concrete steps to satisfy the user's goal, but never exceed {max_s
 NEVER return a generic step such as \"Complete the task\" when the goal clearly requires tools.
 Every tool-dependent requirement must have an explicit step with the exact canonical tool name.
 For research/search requests, create explicit web_search steps.
+For knowledge-base, uploaded-document, "my files", "my documents", policy, or organization-policy requests, create an explicit search_kb step when search_kb is available.
 For arithmetic/calculation requests, create an explicit calculator step.
 For a research task that asks for a calculation, use web_search first to collect the facts, then calculator for the calculation, then leave verification/final synthesis to the agent loop.
 If the available-tool list contains the required tool, prefer using it rather than answering from memory.
