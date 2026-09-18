@@ -302,8 +302,22 @@ class AgentRuntime:
                 lines.append(f"Assistant: {content}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _is_explicit_kb_request(goal: str) -> bool:
+        """Return True when the user explicitly asks for organization/user KB evidence."""
+        lower = (goal or "").lower()
+        kb_terms = (
+            "knowledge base", "knowledge bases", "kb", "uploaded",
+            "my documents", "my document", "my files", "my file",
+            "from my", "using my", "uploaded documents", "uploaded files",
+            "organization policy", "organization policies", "leave policy",
+            "cybersecurity policy", "policy", "policies",
+        )
+        return any(term in lower for term in kb_terms)
+
     async def _understand(
-        self, *, llm: Any, model: str, goal: str, tool_descriptions: str,
+        self, *, llm: Any, model: str, goal: str, tool_names: list[str],
+        tool_descriptions: str,
     ) -> UnderstandingResult:
         """Classify user intent and determine execution path.
 
@@ -359,7 +373,14 @@ class AgentRuntime:
         if data.get("type") == "error":
             logger.warning("Understanding output unparseable: %s", text[:300])
             # Fallback: classify based on heuristics
-            return self._heuristic_classify(stripped)
+            result = self._heuristic_classify(stripped)
+            if self._is_explicit_kb_request(stripped) and self._user_kb_ids and "search_kb" in tool_names:
+                result.intent = RequestIntent.TASK
+                result.needs_plan = True
+                result.needs_tools = True
+                result.needs_verification = True
+                result.reasoning = "Deterministic KB routing fallback"
+            return result
 
         try:
             result = UnderstandingResult.model_validate(data)
@@ -372,13 +393,7 @@ class AgentRuntime:
             # referring to the user's KB/uploaded documents must enter the
             # tool path so search_kb can retrieve grounded evidence.
             elif result.intent == RequestIntent.KNOWLEDGE:
-                kb_terms = (
-                    "knowledge base", "knowledge bases", "kb", "uploaded",
-                    "my documents", "my document", "my files", "my file",
-                    "policy", "policies", "from my", "using my",
-                )
-                goal_lower = goal.lower()
-                wants_user_knowledge = any(term in goal_lower for term in kb_terms)
+                wants_user_knowledge = self._is_explicit_kb_request(goal)
                 if wants_user_knowledge and self._user_kb_ids and "search_kb" in tool_names:
                     result.intent = RequestIntent.TASK
                     result.needs_plan = True
@@ -1303,8 +1318,22 @@ class AgentRuntime:
                 llm=llm,
                 model=model,
                 goal=goal,
+                tool_names=tool_names,
                 tool_descriptions=tool_descriptions,
             )
+
+            # Deterministic routing guard: do not allow the LLM to classify an
+            # explicit KB/policy request as a direct knowledge response.
+            if (
+                self._is_explicit_kb_request(goal)
+                and self._user_kb_ids
+                and "search_kb" in tool_names
+            ):
+                understanding.intent = RequestIntent.TASK
+                understanding.needs_plan = True
+                understanding.needs_tools = True
+                understanding.needs_verification = True
+                understanding.reasoning = "Deterministic KB/policy retrieval routing"
 
             yield _sse("understanding_completed", {
                 "intent": understanding.intent.value,
@@ -1416,6 +1445,25 @@ class AgentRuntime:
                             tool_descriptions=tool_descriptions,
                         )
                         if plan:
+                            # Guarantee a retrieval step for explicit KB/policy
+                            # requests even when a small model returns a generic plan.
+                            if (
+                                self._is_explicit_kb_request(goal)
+                                and self._user_kb_ids
+                                and "search_kb" in tool_names
+                                and not any(s.tool == "search_kb" for s in plan.steps)
+                            ):
+                                plan.steps.insert(
+                                    0,
+                                    PlanStep(
+                                        id=1,
+                                        description="Search the user's knowledge base for relevant policy/document evidence",
+                                        tool="search_kb",
+                                        success_criteria="Relevant KB evidence is retrieved",
+                                    ),
+                                )
+                                for idx, step in enumerate(plan.steps, start=1):
+                                    step.id = idx
                             agent.create_plan([
                                 {"description": s.description, "tool_name": s.tool}
                                 for s in plan.steps
@@ -1653,6 +1701,28 @@ class AgentRuntime:
 
         Includes conversation history for context-aware decisions.
         """
+        # Deterministic guard: an explicit KB/policy request must execute the
+        # pending search_kb step before the model is allowed to complete early.
+        if (
+            self._is_explicit_kb_request(goal)
+            and self._user_kb_ids
+            and "search_kb" in tool_names
+            and agent.tool_call_count == 0
+        ):
+            pending_kb = next(
+                (s for s in agent.plan if s.status in ("pending", "active") and s.tool_name == "search_kb"),
+                None,
+            )
+            if pending_kb is not None:
+                return AgentDecision(
+                    decision="CONTINUE",
+                    reason="Deterministic KB retrieval required for this request",
+                    next_action=ToolAction(
+                        tool="search_kb",
+                        input={"query": goal, "top_k": 5},
+                        reasoning="Retrieve user-owned KB evidence before generating the answer",
+                    ),
+                )
         criteria_text = "\n".join(
             f"- {s.description} (tool: {s.tool_name or 'none'})"
             for s in agent.plan
