@@ -397,7 +397,8 @@ class AgentRuntime:
                 if wants_user_knowledge and self._user_kb_ids and "search_kb" in tool_names:
                     result.intent = RequestIntent.TASK
                     result.needs_plan = True
-                    result.needs_tools = True                    result.needs_verification = True
+                    result.needs_tools = True
+                    result.needs_verification = True
                 else:
                     result.needs_plan = False
                     result.needs_verification = False
