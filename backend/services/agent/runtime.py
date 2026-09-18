@@ -368,10 +368,25 @@ class AgentRuntime:
                 result.needs_plan = False
                 result.needs_tools = False
                 result.needs_verification = False
-            # Override: KNOWLEDGE never needs plan
+            # Knowledge requests are normally answered directly, but requests
+            # referring to the user's KB/uploaded documents must enter the
+            # tool path so search_kb can retrieve grounded evidence.
             elif result.intent == RequestIntent.KNOWLEDGE:
-                result.needs_plan = False
-                result.needs_verification = False
+                kb_terms = (
+                    "knowledge base", "knowledge bases", "kb", "uploaded",
+                    "my documents", "my document", "my files", "my file",
+                    "policy", "policies", "from my", "using my",
+                )
+                goal_lower = goal.lower()
+                wants_user_knowledge = any(term in goal_lower for term in kb_terms)
+                if wants_user_knowledge and self._user_kb_ids and "search_kb" in tool_names:
+                    result.intent = RequestIntent.TASK
+                    result.needs_plan = True
+                    result.needs_tools = True
+                    result.needs_verification = True
+                else:
+                    result.needs_plan = False
+                    result.needs_verification = False
             # Override: ANALYSIS never needs plan
             elif result.intent == RequestIntent.ANALYSIS:
                 result.needs_plan = False
