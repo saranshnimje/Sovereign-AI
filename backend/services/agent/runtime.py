@@ -1031,6 +1031,19 @@ class AgentRuntime:
                     observations.append(obs)
                     if passed:
                         evidence.extend(obs.evidence)
+                        # Preserve the actual retrieval payload as evidence.
+                        # "OK" alone is not useful to the reasoner/verifier.
+                        if action.tool == "search_kb":
+                            kb_results = result.get("results") or []
+                            for item in kb_results[:10]:
+                                content = str(item.get("content") or "").strip()
+                                filename = str(item.get("filename") or "uploaded document")
+                                page = item.get("page_number")
+                                if content:
+                                    location = f", page {page}" if page else ""
+                                    evidence.append(
+                                        f"[KB: {filename}{location}] {content[:1500]}"
+                                    )
 
                     # Trim output for LLM context
                     trimmed = self._trim_output(result)
