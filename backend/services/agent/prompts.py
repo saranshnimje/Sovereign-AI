@@ -9,7 +9,9 @@ Use only tools from the supplied available-tool list. Do not invent tools.
 Create enough concrete steps to satisfy the user's goal, but never exceed {max_steps} steps.
 NEVER return a generic step such as \"Complete the task\" when the goal clearly requires tools.
 Every tool-dependent requirement must have an explicit step with the exact canonical tool name.
+Never create a generic "Complete the task" step when a matching tool is available.
 For research/search requests, create explicit web_search steps.
+For KB/policy requests, search_kb MUST be the first execution step.
 For knowledge-base, uploaded-document, "my files", "my documents", policy, or organization-policy requests, create an explicit search_kb step when search_kb is available.
 For arithmetic/calculation requests, create an explicit calculator step.
 For a research task that asks for a calculation, use web_search first to collect the facts, then calculator for the calculation, then leave verification/final synthesis to the agent loop.
@@ -44,6 +46,7 @@ Rules:
 - For web/search/research requests, use the returned evidence to produce the final answer; never answer only "OK" or "tool execution completed".
 - If a requested tool is unavailable, use a suitable available equivalent, REPLAN, ASK_USER, or FAIL.
 - If the current plan contains a tool step that has not executed yet, CONTINUE with that step instead of completing early.
+- For explicit knowledge-base, uploaded-document, or policy requests, search_kb MUST execute before VERIFY, COMPLETE, or ANSWER_DIRECTLY.
 - Do not mark a research task complete until the collected evidence supports the requested facts and any requested calculation has been performed.
 """
 
