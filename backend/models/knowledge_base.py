@@ -65,6 +65,9 @@ class Document(Base, TimestampMixin):
         "processing_steps", Text, nullable=True
     )
     metadata_json: Mapped[str | None] = mapped_column("metadata", Text, nullable=True)
+    # Object storage: "neon" for Neon Object Storage, None for legacy local files
+    storage_provider: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
+    storage_key: Mapped[str | None] = mapped_column(String(500), nullable=True, default=None)
 
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="documents")
 

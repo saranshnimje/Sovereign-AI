@@ -1,11 +1,19 @@
 """
 Document service — orchestrates the full processing pipeline:
   validate → save → extract → OCR → clean → chunk → embed → index → done
+
+Storage strategy:
+  - Upload: save to local temp dir → upload to Neon Object Storage → delete local
+  - Processing: download from object storage to temp → process → delete temp
+  - Preview/Download: download from object storage → serve → delete temp
+  - Legacy docs (no storage_key): fall back to local storage_path (Render ephemeral)
 """
 from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,9 +63,6 @@ async def reset_document_for_reprocess(db: AsyncSession, doc_id: str) -> bool:
     doc.chunk_count = 0
     doc.processing_steps_json = json.dumps(steps)
     await db.flush()
-    # Server-side onupdate(func.now()) expires `updated_at` after flush;
-    # refresh eagerly so later sync-context reads cannot trigger a lazy
-    # load (which raises MissingGreenlet under AsyncSession).
     await db.refresh(doc)
     return True
 
@@ -69,6 +74,15 @@ def _set_step(steps: list[dict], name: str, status: str, duration_ms: int | None
             if duration_ms is not None:
                 s["duration_ms"] = duration_ms
             break
+
+
+def _storage_key_for_doc(kb_id: str, doc_id: str, safe_name: str) -> str:
+    """Build the object storage key for a document."""
+    return f"uploads/{kb_id}/{doc_id}_{safe_name}"
+
+
+def _content_type_for_mime(mime: str) -> str:
+    return mime or "application/octet-stream"
 
 
 class DocumentService:
@@ -93,9 +107,11 @@ class DocumentService:
         run_ocr: bool = True,
     ) -> Document:
         """
-        Validate, save, and create a Document record (status=pending).
+        Validate, save to object storage, and create a Document record (status=pending).
         Actual processing is enqueued as a FastAPI background task.
         """
+        from services.object_storage import is_available as obj_storage_available, upload_bytes
+
         # Streaming size guard — read in chunks to avoid OOM on huge uploads
         max_bytes = load_settings().max_upload_size_mb * 1024 * 1024
         chunks = []
@@ -127,24 +143,44 @@ class DocumentService:
         if kb is None:
             raise ValueError(f"Knowledge base '{kb_id}' not found")
 
-        # Build storage path
-        kb_dir = Path(get_settings().upload_dir) / kb_id
-        kb_dir.mkdir(parents=True, exist_ok=True)
         doc_id = str(uuid.uuid4())
-        stored_name = f"{doc_id}_{safe_name}"
-        storage_path = str(kb_dir / stored_name)
-
-        # Save file
-        with open(storage_path, "wb") as f:
-            f.write(content)
-
         steps = _make_steps({"validation": "done"})
+
+        # Determine storage strategy
+        use_object_storage = obj_storage_available()
+        storage_key = _storage_key_for_doc(kb_id, doc_id, safe_name)
+        local_path = str(Path(get_settings().upload_dir) / kb_id / f"{doc_id}_{safe_name}")
+
+        if use_object_storage:
+            # Upload to object storage (no local persistence)
+            kb_dir = Path(get_settings().upload_dir) / kb_id
+            kb_dir.mkdir(parents=True, exist_ok=True)
+            with open(local_path, "wb") as f:
+                f.write(content)
+            try:
+                upload_bytes(storage_key, content, _content_type_for_mime(detected_mime))
+            finally:
+                # Clean up local temp file
+                try:
+                    os.remove(local_path)
+                except OSError:
+                    pass
+            # Use the key as the storage_path (for legacy compat)
+            storage_path = storage_key
+        else:
+            # Fallback: local filesystem only (legacy behavior)
+            kb_dir = Path(get_settings().upload_dir) / kb_id
+            kb_dir.mkdir(parents=True, exist_ok=True)
+            storage_path = local_path
+            with open(storage_path, "wb") as f:
+                f.write(content)
+            storage_key = None
 
         doc = Document(
             id=doc_id,
             kb_id=kb_id,
             uploader_id=uploader_id,
-            filename=stored_name,
+            filename=f"{doc_id}_{safe_name}",
             original_name=safe_name,
             mime_type=detected_mime,
             size_bytes=len(content),
@@ -152,6 +188,8 @@ class DocumentService:
             status="pending",
             processing_steps_json=json.dumps(steps),
             metadata_json=json.dumps({"run_ocr": run_ocr}),
+            storage_provider="neon" if use_object_storage else None,
+            storage_key=storage_key,
         )
         self.db.add(doc)
         await self.db.flush()
@@ -167,7 +205,6 @@ class DocumentService:
         """
         import time
 
-        # Re-fetch document in a fresh context  
         doc = await self._get_doc(doc_id)
         if doc is None:
             logger.error("process_document: doc %s not found", doc_id)
@@ -179,13 +216,16 @@ class DocumentService:
 
         await self._set_status(doc_id, "processing")
 
+        # Obtain a local file for processing (download from object storage if needed)
+        local_file = await self._ensure_local_file(doc)
+
         try:
             # ---- 1. Extract ----
             t0 = time.monotonic()
             _set_step(steps, "extraction", "running")
             await self._save_steps(doc_id, steps)
 
-            text, page_count = await extract_text(doc.storage_path, doc.mime_type)
+            text, page_count = await extract_text(local_file, doc.mime_type)
             extract_ms = int((time.monotonic() - t0) * 1000)
             _set_step(steps, "extraction", "done", extract_ms)
 
@@ -194,7 +234,7 @@ class DocumentService:
                 _set_step(steps, "ocr", "running")
                 await self._save_steps(doc_id, steps)
                 t1 = time.monotonic()
-                ocr_text = await run_ocr(doc.storage_path, doc.mime_type)
+                ocr_text = await run_ocr(local_file, doc.mime_type)
                 ocr_ms = int((time.monotonic() - t1) * 1000)
                 text = (text + "\n" + ocr_text).strip() if text else ocr_text
                 _set_step(steps, "ocr", "done", ocr_ms)
@@ -234,8 +274,6 @@ class DocumentService:
             vectors = await self.embedding_svc.embed_texts(
                 [c.content for c in chunks], model=embed_model
             )
-            # ---- P0.8: dimension-drift guard ----
-            # Never truncate, pad, or index incompatible vectors. Fail clearly.
             expected_dim = get_expected_dimension(embed_model)
             if not vectors:
                 raise ValueError(
@@ -264,14 +302,12 @@ class DocumentService:
                     "page_number": c.page_number,
                     "filename":  doc.original_name,
                     "created_at": datetime.now(timezone.utc).isoformat(),
-                    # ---- P0.7: embedding provenance stamps ----
                     "embed_model": embed_model,
-                    "embed_version": embed_model,   # Ollama tag serves as version
+                    "embed_version": embed_model,
                     "embed_dim": expected_dim,
                 }
                 for c in chunks
             ]
-            # Ensure Qdrant collection exists
             vec_dim = len(vectors[0]) if vectors else get_expected_dimension(embed_model)
             self.qdrant_svc.create_collection(doc.kb_id, vec_dim)
             self.qdrant_svc.upsert_vectors(
@@ -286,10 +322,8 @@ class DocumentService:
             await self._finalize(
                 doc_id, steps, page_count=page_count, chunk_count=len(chunks)
             )
-            # Update KB counts
             await self._increment_kb_counts(doc.kb_id, doc_delta=1, chunk_delta=len(chunks))
 
-            # Audit
             audit = AuditService(self.db)
             await audit.log(
                 "document", "document.indexed", "success",
@@ -311,6 +345,14 @@ class DocumentService:
                 resource_type="document", resource_id=doc_id,
                 metadata={"error": str(exc)[:500]},
             )
+        finally:
+            # Clean up local temp directory if it was downloaded from object storage
+            if local_file and doc.storage_provider == "neon":
+                tmp_dir = os.path.dirname(local_file)
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -333,11 +375,6 @@ class DocumentService:
         limit: int = 50,
         offset: int = 0,
     ) -> list[Document]:
-        """
-        List documents scoped to what the user may see:
-        admins see everything; everyone else only documents inside
-        their own knowledge bases. Prevents cross-tenant enumeration.
-        """
         from services.kb_access import kb_access_filter
 
         q = (
@@ -352,20 +389,10 @@ class DocumentService:
         return list(result.scalars().all())
 
     async def reset_for_retry(self, doc_id: str) -> bool:
-        """
-        Reset a FAILED document to pending with cleared error state so the
-        ingestion pipeline can run again. Returns False when the document
-        row disappeared.
-        """
         return await reset_document_for_reprocess(self.db, doc_id)
 
     async def delete_document_checked(self, db_unused, doc_id: str, user) -> None:
-        """
-        Ownership-checked deletion (documents inherit KB ownership).
-        Raises 404 when missing OR not accessible to this user.
-        """
         from fastapi import HTTPException
-
         from services.kb_access import ensure_kb_access
 
         doc = await self._get_doc(doc_id)
@@ -388,18 +415,70 @@ class DocumentService:
         except Exception as exc:
             logger.warning("Failed to delete vectors for doc %s: %s", doc_id, exc)
 
-        # Remove file
+        # Remove from object storage or local disk
         try:
-            if os.path.exists(doc.storage_path):
+            if doc.storage_provider == "neon" and doc.storage_key:
+                from services.object_storage import delete_object
+                delete_object(doc.storage_key)
+            elif doc.storage_path and os.path.exists(doc.storage_path):
                 os.remove(doc.storage_path)
         except Exception as exc:
-            logger.warning("Failed to delete file %s: %s", doc.storage_path, exc)
+            logger.warning("Failed to delete file for doc %s: %s", doc_id, exc)
 
         # Update KB counts
         await self._increment_kb_counts(doc.kb_id, doc_delta=-1, chunk_delta=-doc.chunk_count)
 
         await self.db.delete(doc)
         await self.db.flush()
+
+    # ------------------------------------------------------------------
+    # Object storage helpers
+    # ------------------------------------------------------------------
+    async def _ensure_local_file(self, doc: Document) -> str:
+        """
+        Return a local file path suitable for processing.
+        For object-storage docs: downloads to a temp file and returns the path.
+        For legacy local docs: returns the storage_path directly.
+        """
+        if doc.storage_provider == "neon" and doc.storage_key:
+            from services.object_storage import download_bytes
+            tmp_dir = tempfile.mkdtemp(prefix="doc_dl_")
+            ext = doc.original_name.rsplit(".", 1)[-1] if "." in doc.original_name else "bin"
+            local_path = os.path.join(tmp_dir, f"{doc.id}.{ext}")
+            data = download_bytes(doc.storage_key)
+            with open(local_path, "wb") as f:
+                f.write(data)
+            return local_path
+        # Legacy: local file
+        if doc.storage_path and os.path.exists(doc.storage_path):
+            return doc.storage_path
+        raise FileNotFoundError(
+            f"Document binary not found (storage_path={doc.storage_path})"
+        )
+
+    def get_document_bytes(self, doc: Document) -> bytes:
+        """Download document bytes from object storage. For preview/download endpoints."""
+        if doc.storage_provider == "neon" and doc.storage_key:
+            from services.object_storage import download_bytes
+            return download_bytes(doc.storage_key)
+        if doc.storage_path and os.path.exists(doc.storage_path):
+            with open(doc.storage_path, "rb") as f:
+                return f.read()
+        raise FileNotFoundError("Document binary not found")
+
+    def get_document_text_preview(self, doc: Document, max_bytes: int = 512 * 1024) -> tuple[str, bool]:
+        """Read text content of a document for preview. Returns (text, truncated)."""
+        if doc.storage_provider == "neon" and doc.storage_key:
+            from services.object_storage import download_bytes
+            data = download_bytes(doc.storage_key)
+            text = data[:max_bytes].decode("utf-8", errors="replace")
+            return text, len(data) > max_bytes
+        if doc.storage_path and os.path.exists(doc.storage_path):
+            size = os.path.getsize(doc.storage_path)
+            with open(doc.storage_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(max_bytes)
+            return text, size > max_bytes
+        raise FileNotFoundError("Document binary not found")
 
     # ------------------------------------------------------------------
     # Private helpers

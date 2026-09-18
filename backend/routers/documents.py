@@ -17,11 +17,10 @@ resource returns a deliberate 404 (never 403), so existence is not leaked.
 import json
 import logging
 import mimetypes
-import os
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import AsyncSessionLocal, get_db
@@ -156,8 +155,6 @@ async def preview_document(
 ):
     """Return document text content for in-browser preview."""
     doc, _kb = await get_document_checked(db, doc_id, user)
-    if not doc.storage_path or not os.path.exists(doc.storage_path):
-        raise HTTPException(404, "Document file not found on disk")
 
     ext = doc.original_name.rsplit(".", 1)[-1].lower() if "." in doc.original_name else ""
     text_exts = {"txt", "md", "markdown", "csv", "json", "log", "ini", "cfg", "conf",
@@ -165,16 +162,16 @@ async def preview_document(
                  "jsx", "py", "rb", "go", "rs", "java", "c", "cpp", "h", "hpp",
                  "cs", "php", "sh", "bash", "sql"}
 
-    if ext in text_exts or (doc.mime_type and doc.mime_type.startswith("text/")):
-        try:
-            with open(doc.storage_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read(512 * 1024)
-        except Exception as exc:
-            logger.warning("Failed to read doc %s: %s", doc_id, exc)
-            raise HTTPException(500, "Failed to read document")
-        return {"content": content, "filename": doc.original_name, "mime_type": doc.mime_type, "truncated": os.path.getsize(doc.storage_path) > 512 * 1024}
-
-    return {"content": None, "filename": doc.original_name, "mime_type": doc.mime_type, "truncated": False, "binary": True}
+    svc = _doc_service(db)
+    try:
+        if ext in text_exts or (doc.mime_type and doc.mime_type.startswith("text/")):
+            content, truncated = svc.get_document_text_preview(doc)
+            return {"content": content, "filename": doc.original_name, "mime_type": doc.mime_type, "truncated": truncated}
+        else:
+            # Binary file — frontend will use download URL
+            return {"content": None, "filename": doc.original_name, "mime_type": doc.mime_type, "truncated": False, "binary": True}
+    except FileNotFoundError:
+        raise HTTPException(404, "Document file not found — the original binary is no longer available")
 
 
 @router.get("/{doc_id}/download")
@@ -187,10 +184,19 @@ async def download_document(
 ):
     """Stream the original file for download. Tenancy enforced via 404."""
     doc, _kb = await get_document_checked(db, doc_id, user)
-    if not doc.storage_path or not os.path.exists(doc.storage_path):
-        raise HTTPException(404, "Document file not found on disk")
+    svc = _doc_service(db)
+
+    try:
+        data = svc.get_document_bytes(doc)
+    except FileNotFoundError:
+        raise HTTPException(404, "Document file not found — the original binary is no longer available")
+
     media_type = doc.mime_type or mimetypes.guess_type(doc.original_name)[0] or "application/octet-stream"
-    return FileResponse(path=doc.storage_path, filename=doc.original_name, media_type=media_type)
+    return StreamingResponse(
+        iter([data]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{doc.original_name}"'},
+    )
 
 
 async def get_kb_checked_for_upload(db: AsyncSession, kb_id: str, user: User):

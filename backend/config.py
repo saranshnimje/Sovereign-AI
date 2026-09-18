@@ -108,6 +108,13 @@ class Settings(BaseSettings):
     default_chat_model: str = "llama3.2:3b"
     default_vision_model: str = ""
 
+    # ---- Neon Object Storage (S3-compatible) ----
+    neon_storage_endpoint: str = ""
+    neon_storage_region: str = "us-east-2"
+    neon_storage_access_key: str = ""
+    neon_storage_secret_key: str = ""
+    neon_storage_bucket: str = ""
+
     # ---- Derived paths ----
     @property
     def upload_dir(self) -> str:
@@ -142,7 +149,7 @@ _INSECURE_SECRET_MARKERS = (
 
 
 def _validate_production_secrets(settings: "Settings") -> None:
-    """Refuse to boot in production with insecure secrets."""
+    """Refuse to boot in production with insecure secrets or missing object storage."""
     if settings.environment.strip().lower() != "production":
         return
 
@@ -161,6 +168,26 @@ def _validate_production_secrets(settings: "Settings") -> None:
                 f"('{marker}') while ENVIRONMENT=production. Set a real secret via "
                 "the SECRET_KEY environment variable."
             )
+
+    # Neon Object Storage is required for persistent document storage.
+    # Without it, uploads silently go to Render's ephemeral disk and are lost on deploy.
+    missing = []
+    if not settings.neon_storage_endpoint:
+        missing.append("NEON_STORAGE_ENDPOINT")
+    if not settings.neon_storage_access_key:
+        missing.append("NEON_STORAGE_ACCESS_KEY_ID")
+    if not settings.neon_storage_secret_key:
+        missing.append("NEON_STORAGE_SECRET_ACCESS_KEY")
+    if not settings.neon_storage_bucket:
+        missing.append("NEON_STORAGE_BUCKET")
+    if missing:
+        raise RuntimeError(
+            "REFUSING TO START: Neon Object Storage is not configured "
+            f"while ENVIRONMENT=production. Missing: {', '.join(missing)}. "
+            "Without object storage, uploaded documents will be silently stored on "
+            "Render's ephemeral disk and lost on the next deploy. "
+            "Set these environment variables in the Render dashboard."
+        )
 
 
 @lru_cache

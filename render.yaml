@@ -5,10 +5,6 @@ services:
     buildCommand: cd backend && pip install -r requirements.txt
     startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
-    disk:
-      name: data
-      mountPath: /app/data
-      sizeGB: 1
     envVars:
       - key: SECRET_KEY
         generateValue: true
@@ -42,3 +38,13 @@ services:
         value: "600"
       - key: TERMINAL_ENABLED
         value: "false"
+      - key: NEON_STORAGE_ENDPOINT
+        sync: false
+      - key: NEON_STORAGE_REGION
+        value: us-east-2
+      - key: NEON_STORAGE_ACCESS_KEY_ID
+        sync: false
+      - key: NEON_STORAGE_SECRET_ACCESS_KEY
+        sync: false
+      - key: NEON_STORAGE_BUCKET
+        sync: false
