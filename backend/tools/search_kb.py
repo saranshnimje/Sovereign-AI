@@ -70,6 +70,18 @@ async def execute(inp: SearchKBInput, context: dict) -> dict:
         generate_answer=False,
     )
 
+    # Surface retrieval/embedding failures to the agent instead of converting
+    # them into a misleading successful empty search.
+    if result.error:
+        return {
+            "results": [],
+            "found": False,
+            "count": 0,
+            "note": result.error,
+            "error": result.error,
+            "failure_type": "UNAVAILABLE",
+        }
+
     items = [
         {
             "content": s.content,
