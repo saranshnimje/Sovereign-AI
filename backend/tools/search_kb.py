@@ -43,7 +43,7 @@ async def execute(inp: SearchKBInput, context: dict) -> dict:
     # (no exception, no data, no existence signal beyond emptiness).
     user = context.get("user")
     kb_service = context.get("kb_service")
-    embedding_model = "nomic-embed-text"
+    embedding_model = None
     if kb_service:
         try:
             kb = await kb_service.get(inp.kb_id)
@@ -58,8 +58,16 @@ async def execute(inp: SearchKBInput, context: dict) -> dict:
                 results=[], found=False, count=0,
                 note="Knowledge base not found",
             ).model_dump()
-        except Exception:
-            pass
+        except Exception as exc:
+            return SearchKBOutput(
+                results=[], found=False, count=0,
+                note=f"Failed to retrieve knowledge base: {exc}",
+            ).model_dump()
+    else:
+        return SearchKBOutput(
+            results=[], found=False, count=0,
+            note="Knowledge base service unavailable",
+        ).model_dump()
 
     result = await rag_service.query(
         kb_id=inp.kb_id,

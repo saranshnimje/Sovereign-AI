@@ -326,9 +326,60 @@ Sovereign-AI/
 - `docs/14_User_Guide.md` — user guide
 - `docs/15_Project_README.md` — this project README
 
+## Production deployment (Vercel + Render)
+
+### Architecture
+
+```text
+Browser → Vercel (React SPA) → Render (FastAPI) → AgentRuntime → ToolRegistry → Gemini/Qdrant
+```
+
+### Frontend (Vercel)
+
+**Required environment variable:**
+
+| Variable | Value | Notes |
+|---|---|---|
+| `VITE_API_URL` | `https://sovereign-ai-backend-ciy8.onrender.com` | Must NOT be empty — empty string means same-origin (Vercel), which has no backend |
+
+Without `VITE_API_URL`, all API requests fail with "Failed to fetch" because the frontend sends requests to the Vercel domain which has no backend.
+
+### Backend (Render)
+
+**Required environment variables:**
+
+| Variable | Value | Notes |
+|---|---|---|
+| `SECRET_KEY` | Auto-generated (Render) | Must be ≥32 characters in production |
+| `DATABASE_URL` | Neon PostgreSQL connection string | Production database |
+| `QDRANT_URL` | Qdrant Cloud cluster URL | Vector search backend |
+| `QDRANT_API_KEY` | Qdrant Cloud API key | Set via Render dashboard |
+| `FRONTEND_ORIGIN` | `https://sovereign-ai-workbench-2026.vercel.app` | CORS allowlist |
+| `FRONTEND_ORIGINS` | Same as above, or comma-separated list | Alternative to FRONTEND_ORIGIN |
+| `ENVIRONMENT` | `production` | Triggers production validation |
+| `GEMINI_API_KEY` | Google AI Studio key | Backend-only, never exposed to frontend |
+| `NEON_STORAGE_ACCESS_KEY` | Neon Object Storage key | Document upload storage |
+| `NEON_STORAGE_SECRET_KEY` | Neon Object Storage secret | Document upload storage |
+
+**Optional:**
+
+| Variable | Value | Notes |
+|---|---|---|
+| `OLLAMA_BASE_URL` | Ollama server URL | Local development only; not used in production |
+
+### CORS
+
+Backend CORS is configured via `FRONTEND_ORIGINS` or `FRONTEND_ORIGIN` environment variables. Wildcard `*` is never used. Dev origins (`localhost:5173`) are only added when `ENVIRONMENT != production`.
+
+### API key security
+
+- `GEMINI_API_KEY` is stored in Render environment variables only
+- Frontend never sees or transmits API keys
+- Provider API keys are stored in the database and never returned in full (only existence is reported)
+
 ## Current verification
 
-The latest application fix is commit `fc1a854` on `main`.
+The latest application fix is on branch `fix/agent-runtime-and-rag`.
 
 - 787 backend tests passed in the latest repository verification.
 - Frontend TypeScript compilation and Vite build passed.

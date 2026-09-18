@@ -800,7 +800,8 @@ class AgentRuntime:
                 case "CONTINUE" | "RETRY":
                     if decision.next_action is None:
                         agent.fail("Reasoner returned CONTINUE/RETRY without next_action")
-                        no_action_msg = "No action provided by reasoner"                        yield _sse("agent_state", agent.to_dict())
+                        no_action_msg = "No action provided by reasoner"
+                        yield _sse("agent_state", agent.to_dict())
                         yield _sse("error", {"message": no_action_msg})
                         yield _sse("final_response", {
                             "content": no_action_msg,
@@ -1199,7 +1200,8 @@ class AgentRuntime:
                         ],
                         "observations": [],
                         "verification": None,
-                    })                    _result[0] = decision.reason
+                    })
+                    _result[0] = decision.reason
                     return
 
         else:
@@ -1598,7 +1600,8 @@ class AgentRuntime:
                     metadata_json=_json.dumps({
                         "agent": True,
                         "state": agent.state.value,
-                        "tool_calls": agent.tool_call_count,                        "run_id": run_id,
+                        "tool_calls": agent.tool_call_count,
+                        "run_id": run_id,
                     }),
                 )
                 self._db.add(assistant_msg)
@@ -1707,7 +1710,7 @@ class AgentRuntime:
         observations: list[Observation],
         evidence: list[str],
         failed_attempts: list[dict],
-        tool_results_context: list[dict[str, str]],
+        tool_results_context: list[str],
         tool_names: list[str],
         tool_descriptions: str,
     ) -> AgentDecision:
@@ -1998,3 +2001,265 @@ class AgentRuntime:
     # ------------------------------------------------------------------
     # Internal: Replanning
     # ------------------------------------------------------------------
+
+    async def _replan(
+        self, *, llm: Any, model: str, goal: str,
+        acceptance_criteria: list[str],
+        failure_reason: str,
+        failed_steps: list[str],
+        evidence: list[str],
+    ) -> Plan | None:
+        """Create a new plan after failure."""
+        system = REPLANNER_SYSTEM
+        user = REPLANNER_USER.format(
+            goal=goal,
+            criteria="\n".join(f"- {c}" for c in acceptance_criteria) or "None defined.",
+            failure_reason=failure_reason,
+            failed_steps="\n".join(f"- {s}" for s in failed_steps) or "None.",
+            evidence="\n".join(f"- {e[:100]}" for e in evidence[-5:]) or "None.",
+        )
+
+        try:
+            resp = await asyncio.wait_for(
+                llm.chat(
+                    model=model,
+                    messages=[
+                        ChatMessage(role="system", content=system),
+                        ChatMessage(role="user", content=user),
+                    ],
+                    stream=False,
+                    temperature=0.0,
+                    max_tokens=2048,
+                ),
+                timeout=_TIMEOUT_REPLANNER,
+            )
+            text = (resp.content or "") if hasattr(resp, "content") else str(resp)
+        except (asyncio.TimeoutError, ModelUnavailableError, Exception) as exc:
+            logger.warning("Replanning failed: %s", exc)
+            return None
+
+        data = parse_llm_json(text)
+        if data.get("type") == "error":
+            return None
+
+        try:
+            return Plan.model_validate(data)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Internal: Tool Execution (via security chain)
+    # ------------------------------------------------------------------
+
+    async def _execute_tool(
+        self, *, tool_name: str, tool_input: dict,
+        user_role: str, db: AsyncSession, user_id: str,
+        reg: Any, llm: Any = None, skip_approval: bool = True,
+    ) -> dict:
+        """Execute a tool through the security chain.
+
+        LLM -> ToolRegistry -> Permission -> Validation -> [Approval] -> Execute -> Result
+
+        Per-tool timeout: 30s (independent of global agent timeout).
+        Approval gate is skipped by default in autonomous agent mode
+        (skip_approval=True) because there is no human to approve mid-run.
+        """
+        t0 = time.monotonic()
+        _TOOL_TIMEOUT_SECONDS = 30.0
+
+        # 0. Canonicalize the tool name before anything else so LLM aliases
+        #    (websearch -> web_search, webfetch -> web_fetch, ...) resolve to the
+        #    registry name used for lookup, permission, validation, execution,
+        #    lifecycle events, and the tool-call UI.
+        canonical = canonicalize_tool_name(tool_name)
+        if canonical != tool_name:
+            logger.info("Canonicalized tool '%s' -> '%s'", tool_name, canonical)
+            tool_name = canonical
+
+        # 1. Lookup tool
+        tool = reg.get(tool_name)
+        if tool is None:
+            return {
+                "error": f"Tool '{tool_name}' not found or not enabled",
+                "failure_type": "NOT_FOUND",
+                "tool": tool_name,
+                "provided_arguments": tool_input,
+            }
+
+        # 2. Permission check
+        try:
+            reg.check_permission(tool, user_role)
+        except PermissionError as exc:
+            return {
+                "error": str(exc),
+                "failure_type": "FATAL",
+                "tool": tool_name,
+                "provided_arguments": tool_input,
+            }
+
+        # 3. Input validation
+        # Auto-inject kb_id for search_kb when user has KBs.
+        # The LLM should never need to guess kb_id — we inject it from context.
+        if tool_name == "search_kb" and self._user_kb_ids:
+            if not tool_input.get("kb_id"):
+                tool_input = {**tool_input, "kb_id": self._user_kb_ids[0]}
+                logger.info("Auto-injected kb_id=%s for search_kb", self._user_kb_ids[0])
+        try:
+            validated_input = reg.validate_input(tool, tool_input)
+        except Exception as exc:
+            return {
+                "error": f"Input validation failed: {exc}",
+                "failure_type": "INVALID_TOOL_ARGUMENTS",
+                "tool": tool_name,
+                "provided_arguments": tool_input,
+            }
+
+        # 4. Approval gate (skipped for low/medium risk in autonomous agent mode)
+        # High and critical risk tools ALWAYS require approval, even in autonomous mode.
+        # This prevents dangerous tools (e.g., terminal commands) from executing
+        # without human oversight.
+        from tools.registry import RISK_HIGH, RISK_CRITICAL
+        needs_approval = reg.requires_approval(tool)
+        if needs_approval and not skip_approval:
+            from services.approval_service import ApprovalService
+            approval_svc = ApprovalService(db)
+            req = await approval_svc.create_request(
+                agent_run_id=None,
+                requester_id=user_id,
+                tool_name=tool_name,
+                tool_input=validated_input.model_dump(),
+                risk_level=tool.risk_level,
+            )
+            try:
+                approved, note = await asyncio.wait_for(
+                    approval_svc.wait_for_decision(req.id),
+                    timeout=_TOOL_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "error": f"Tool '{tool_name}' approval timed out ({_TOOL_TIMEOUT_SECONDS}s)",
+                    "failure_type": "TRANSIENT",
+                    "tool": tool_name,
+                    "provided_arguments": tool_input,
+                }
+            if not approved:
+                return {"error": f"Approval denied: {note}"}
+        elif needs_approval and skip_approval and tool.risk_level in (RISK_HIGH, RISK_CRITICAL):
+            return {
+                "error": f"Tool '{tool_name}' requires human approval (risk={tool.risk_level})",
+                "failure_type": "FATAL",
+                "tool": tool_name,
+                "provided_arguments": tool_input,
+            }
+
+        # 5. Build context with services tools need
+        from types import SimpleNamespace
+        context = {
+            "user": SimpleNamespace(id=user_id, role=user_role),
+            "workspace_path": getattr(self, "_workspace_path", ""),
+        }
+
+        # Lazily initialize RAG/KB services for tools that need them
+        if tool_name in ("search_kb",):
+            try:
+                from services.knowledge_base_service import KnowledgeBaseService
+                from services.qdrant_service import QdrantService
+                from services.embedding_service import EmbeddingService
+                from services.rag_service import RagService
+
+                qdrant_svc = QdrantService()
+                kb_svc = KnowledgeBaseService(db, qdrant_svc)
+                context["kb_service"] = kb_svc
+
+                if llm is not None:
+                    embedding_svc = EmbeddingService(llm)
+                    rag_svc = RagService(
+                        llm=llm,
+                        embedding_svc=embedding_svc,
+                        qdrant_svc=qdrant_svc,
+                    )
+                    context["rag_service"] = rag_svc
+            except Exception as exc:
+                logger.debug("Failed to init RAG services for tool %s: %s", tool_name, exc)
+
+        # 6. Execute with per-tool timeout
+        try:
+            output = await asyncio.wait_for(
+                reg.execute(tool, validated_input, context),
+                timeout=_TOOL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            return {
+                "error": f"Tool '{tool_name}' execution timed out ({_TOOL_TIMEOUT_SECONDS}s)",
+                "failure_type": "TRANSIENT",
+                "tool": tool_name,
+                "provided_arguments": tool_input,
+                "duration_ms": duration_ms,
+            }
+        except Exception as exc:
+            output = {"error": str(exc)[:1000]}
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        output["duration_ms"] = duration_ms
+
+        return output
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _make_workspace(self, run_id: str) -> str:
+        """Create an isolated workspace directory for file operations."""
+        import uuid as _uuid
+        from config import get_settings
+        settings = get_settings()
+        workspace = os.path.join(
+            settings.sandbox_workspace,
+            f"run_{run_id}_{_uuid.uuid4().hex[:8]}"
+        )
+        os.makedirs(workspace, exist_ok=True)
+        logger.info("Created workspace: %s", workspace)
+        return workspace
+
+    @staticmethod
+    def _cleanup_workspace(workspace: str) -> None:
+        """Clean up workspace directory after run completes."""
+        import shutil as _shutil
+        try:
+            if workspace and os.path.isdir(workspace):
+                _shutil.rmtree(workspace, ignore_errors=True)
+                logger.info("Cleaned workspace: %s", workspace)
+        except Exception as exc:
+            logger.warning("Could not clean workspace %s: %s", workspace, exc)
+
+    @staticmethod
+    def _trim_output(output: dict) -> dict:
+        trimmed = {}
+        for k, v in output.items():
+            if isinstance(v, str) and len(v) > _MAX_OUTPUT_IN_CONTEXT:
+                trimmed[k] = v[:_MAX_OUTPUT_IN_CONTEXT] + "...[truncated]"
+            else:
+                trimmed[k] = v
+        return trimmed
+
+    @staticmethod
+    def _extract_artifacts(tool_name: str, result: dict) -> list[str]:
+        """Extract artifact paths from tool results."""
+        artifacts = []
+        if tool_name == "file_write" and result.get("path"):
+            artifacts.append(result["path"])
+        if tool_name == "file_read" and result.get("path"):
+            artifacts.append(result["path"])
+        return artifacts
+
+    async def _get_run_record(self, db: AsyncSession, run_id: str | None):
+        """Get the AgentRun record from DB for status updates."""
+        if not run_id:
+            return None
+        try:
+            from models.agent import AgentRun
+            result = await db.execute(select(AgentRun).where(AgentRun.id == run_id))
+            return result.scalar_one_or_none()
+        except Exception:
+            return None

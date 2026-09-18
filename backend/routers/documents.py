@@ -206,6 +206,6 @@ async def get_kb_checked_for_upload(db: AsyncSession, kb_id: str, user: User):
     from sqlalchemy import select
     result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
     kb = result.scalar_one_or_none()
-    if kb is None or not ensure_kb_access(user, kb, write=True):
+    if kb is None or not ensure_kb_access(kb, user, write=True):
         raise HTTPException(404, "Knowledge base not found")
     return kb

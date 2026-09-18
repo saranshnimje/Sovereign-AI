@@ -259,7 +259,7 @@ async def send_message(
     try:
         raw_body = await request.body()
         if raw_body:
-            body_json = _json.loads(raw_body)
+            body_json = json.loads(raw_body)
             rag_kb_ids = body_json.get("rag_kb_ids")
     except Exception:
         pass
@@ -311,7 +311,7 @@ async def send_message(
             kb_result = await db.execute(
                 select(KnowledgeBase).where(
                     KnowledgeBase.id.in_(rag_kb_ids),
-                    KnowledgeBase.user_id == current_user.id,
+                    KnowledgeBase.owner_id == current_user.id,
                 )
             )
             authorized_kbs = list(kb_result.scalars().all())
@@ -420,20 +420,29 @@ async def send_agent_message(
     from database import AsyncSessionLocal
     session = (_session_factory or AsyncSessionLocal)()
 
+    # --- Validate provider BEFORE starting SSE stream ---
+    # Returning structured HTTP errors before SSE starts ensures the frontend
+    # can display meaningful error messages instead of "Failed to fetch".
     if data.provider_id:
         from models.provider import LLMProvider as _P
         from services.llm_client import build_provider as _build
         res = await db.execute(select(_P).where(_P.id == data.provider_id))
         prov = res.scalar_one_or_none()
         if prov is None:
-            raise HTTPException(404, "Provider not found")
+            raise HTTPException(404, detail={"error": {"code": "provider_not_found", "message": "Provider not found", "stage": "provider_resolution"}})
         if not prov.enabled:
-            raise HTTPException(400, "Provider is disabled")
-        llm = _build(prov.provider_type, prov.base_url, prov.api_key,
-                     custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None)
+            raise HTTPException(400, detail={"error": {"code": "provider_disabled", "message": "Provider is disabled", "stage": "provider_resolution"}})
+        try:
+            llm = _build(prov.provider_type, prov.base_url, prov.api_key,
+                         custom_headers=prov.custom_headers if hasattr(prov, 'custom_headers') and prov.custom_headers else None)
+        except Exception as exc:
+            raise HTTPException(400, detail={"error": {"code": "provider_build_failed", "message": f"Cannot initialize provider: {str(exc)[:200]}", "stage": "provider_resolution"}})
         model_label = f"{prov.name} / {data.model_name or prov.model_name}"
     else:
-        llm = await resolve_llm_for_role_async(session, "chat")
+        try:
+            llm = await resolve_llm_for_role_async(session, "chat")
+        except Exception as exc:
+            raise HTTPException(503, detail={"error": {"code": "no_providers", "message": "No LLM providers configured. Add a provider in Settings.", "stage": "provider_resolution"}})
         model_label = f"Auto / {data.model_name or 'default'}"
 
     from sqlalchemy.orm import selectinload
@@ -443,7 +452,7 @@ async def send_agent_message(
         Conversation.id == conv_id, Conversation.user_id == current_user.id))
     conv = res.scalar_one_or_none()
     if conv is None:
-        raise HTTPException(404, "Conversation not found")
+        raise HTTPException(404, detail={"error": {"code": "conversation_not_found", "message": "Conversation not found", "stage": "conversation_lookup"}})
 
     # Build conversation history for agent memory
     # Include recent messages (up to 20) for context-aware agent responses
@@ -516,7 +525,7 @@ async def send_agent_message(
     run_id = agent_run.id
 
     # Delegate to runtime
-    from services.agent.runtime import AgentRuntime, _PERSIST_EVENT_TYPES
+    from services.agent.runtime import AgentRuntime, _PERSIST_EVENT_TYPES, _sse
 
     runtime = AgentRuntime()
 
