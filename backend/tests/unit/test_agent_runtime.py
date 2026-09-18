@@ -657,6 +657,6 @@ async def test_explicit_kb_request_forces_search_kb_before_llm():
     assert decision.decision == "CONTINUE"
     assert decision.next_action is not None
     assert decision.next_action.tool == "search_kb"
-    assert decision.next_action.input["kb_id"] if "kb_id" in decision.next_action.input else True
+    assert "kb_id" not in decision.next_action.input  # runtime injects the owned KB ID at execution time
     assert decision.next_action.input["query"] == "using my knowledge base, tell me the leave policy"
     llm.chat.assert_not_awaited()
