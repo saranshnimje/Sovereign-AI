@@ -21,6 +21,11 @@ _AGENT_RUNS_COLUMNS = [
     ("user_answer", "TEXT"),
 ]
 
+_DOCUMENT_COLUMNS = [
+    ("storage_provider", "VARCHAR(20)"),
+    ("storage_key", "VARCHAR(500)"),
+]
+
 
 async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None:
     try:
@@ -28,6 +33,16 @@ async def run_startup_migrations(engine: AsyncEngine, is_postgres: bool) -> None
             for col_name, col_ddl in _AGENT_RUNS_COLUMNS:
                 if not await _column_exists(conn, "agent_runs", col_name, is_postgres):
                     await conn.execute(text(f"ALTER TABLE agent_runs ADD COLUMN {col_name} {col_ddl}"))
+
+            for col_name, col_ddl in _DOCUMENT_COLUMNS:
+                if not await _column_exists(conn, "documents", col_name, is_postgres):
+                    await conn.execute(text(f"ALTER TABLE documents ADD COLUMN {col_name} {col_ddl}"))
+
+            if is_postgres and await _table_exists(conn, "documents", True):
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_documents_storage_provider "
+                    "ON documents (storage_provider)"
+                ))
 
             if is_postgres and not await _table_exists(conn, "agent_events", True):
                 await conn.execute(text("""
@@ -144,7 +159,7 @@ async def _stamp_alembic_head(conn) -> None:
         )
     """))
     current = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar()
-    target = "b7c8d9e0f1a2"
+    target = "a1b2c3d4e5f8"
     if current != target:
         await conn.execute(text("DELETE FROM alembic_version"))
         await conn.execute(text(
