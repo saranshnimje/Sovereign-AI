@@ -148,6 +148,25 @@ _INSECURE_SECRET_MARKERS = (
 )
 
 
+def _apply_storage_env_aliases() -> None:
+    """Normalize Neon Console/AWS S3 environment variable names."""
+    aliases = {
+        "NEON_STORAGE_ENDPOINT": ("NEON_STORAGE_ENDPOINT", "AWS_ENDPOINT_URL_S3"),
+        "NEON_STORAGE_REGION": ("NEON_STORAGE_REGION", "AWS_REGION"),
+        "NEON_STORAGE_ACCESS_KEY": ("NEON_STORAGE_ACCESS_KEY_ID", "NEON_STORAGE_ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
+        "NEON_STORAGE_SECRET_KEY": ("NEON_STORAGE_SECRET_ACCESS_KEY", "NEON_STORAGE_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"),
+        "NEON_STORAGE_BUCKET": ("NEON_STORAGE_BUCKET",),
+    }
+    for target, candidates in aliases.items():
+        if os.environ.get(target, "").strip():
+            continue
+        for source in candidates:
+            value = os.environ.get(source, "").strip()
+            if value:
+                os.environ[target] = value
+                break
+
+
 def _validate_production_secrets(settings: "Settings") -> None:
     """Refuse to boot in production with insecure secrets or missing object storage."""
     if settings.environment.strip().lower() != "production":
@@ -193,6 +212,7 @@ def _validate_production_secrets(settings: "Settings") -> None:
 @lru_cache
 def get_settings() -> Settings:
     """Return cached Settings instance. Call once per process."""
+    _apply_storage_env_aliases()
     settings = Settings()
     _validate_production_secrets(settings)
     return settings
