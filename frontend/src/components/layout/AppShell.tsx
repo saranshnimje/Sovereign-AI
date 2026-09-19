@@ -118,6 +118,8 @@ export default function AppShell() {
   const [status, setStatus] = useState<SystemStatus | null>(null)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
 
   const role = user?.role ?? 'viewer'
   const navItems = NAV_ITEMS.filter((n) => n.roles.includes(role))
@@ -137,13 +139,24 @@ export default function AppShell() {
   }, [location.pathname])
 
   useEffect(() => {
-    if (!notificationsOpen) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setNotificationsOpen(false)
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setSearchOpen(true)
+        window.setTimeout(() => document.getElementById('global-search')?.focus(), 0)
+      }
+      if (event.key === 'Escape') setSearchOpen(false)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [notificationsOpen])
+  }, [])
+
+  const searchResults = navItems.filter(item => item.label.toLowerCase().includes(searchQuery.trim().toLowerCase()))
+  const handleSearchSelect = (to: string) => {
+    setSearchQuery('')
+    setSearchOpen(false)
+    navigate(to)
+  }
 
   const handleLogout = async () => {
     try { await authApi.logout() } catch { /* ignore */ }
@@ -187,14 +200,22 @@ export default function AppShell() {
             </svg>
           </button>
 
-          <div className="hidden md:flex items-center flex-1 max-w-md mx-4">
-            <div className="flex items-center gap-2 w-full px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-neutral-500 text-sm">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <div className="hidden md:block relative flex-1 max-w-md mx-4">
+            <div className="flex items-center gap-2 w-full px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-neutral-500 text-sm focus-within:border-cyan-500/50">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
               </svg>
-              <span>Search anything...</span>
+              <input id="global-search" type="search" value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); setSearchOpen(true) }} onFocus={() => setSearchOpen(true)} onKeyDown={(event) => { if (event.key === 'Enter' && searchResults[0]) handleSearchSelect(searchResults[0].to) }} placeholder="Search anything..." aria-label="Search anything" className="w-full bg-transparent outline-none text-neutral-200 placeholder:text-neutral-500" />
               <span className="ml-auto text-[10px] bg-surface-muted px-1.5 py-0.5 rounded text-neutral-600 border border-surface-border">Ctrl+K</span>
             </div>
+            {searchOpen && searchQuery.trim() && (
+              <div className="absolute left-0 right-0 top-full mt-2 bg-surface border border-surface-border rounded-xl shadow-2xl overflow-hidden z-50">
+                {searchResults.length > 0 ? searchResults.map((item) => {
+                  const Icon = item.icon
+                  return <button key={item.to} onMouseDown={(event) => event.preventDefault()} onClick={() => handleSearchSelect(item.to)} className="w-full flex items-center gap-3 px-3 py-2.5 text-left text-sm text-neutral-300 hover:bg-surface-muted hover:text-cyan-400 transition-colors"><Icon /><span>{item.label}</span></button>
+                }) : <div className="px-3 py-3 text-xs text-neutral-500">No matching pages found.</div>}
+              </div>
+            )}
           </div>
 
           <div className="ml-auto flex items-center gap-2 md:gap-3">
