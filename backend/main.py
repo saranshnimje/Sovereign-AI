@@ -65,6 +65,18 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.get("/")
+    async def root():
+        """Public landing endpoint for the deployed backend."""
+        return {
+            "service": "Sovereign AI Workbench API",
+            "status": "ok",
+            "version": "1.0.0",
+            "message": "Backend is running. Use /health for a lightweight health check.",
+            "health": "/health",
+            "api": "/api/v1",
+        }
+
     @app.get("/health")
     async def health_check():
         """Lightweight public health check for uptime monitoring."""
